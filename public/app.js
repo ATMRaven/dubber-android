@@ -462,7 +462,8 @@
 
     isTranscribingChunk = true;
     try {
-      const res = await fetch(`/api/transcribe?lang=${encodeURIComponent(state.srcLang)}`, {
+      const transcribeUrl = `https://dubber.atmr.workers.dev/api/transcribe?lang=${encodeURIComponent(state.srcLang)}`;
+      const res = await fetch(transcribeUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'audio/wav' },
         body: wavBlob
@@ -867,50 +868,106 @@
   /**
    * Fast simultaneous translation via OpenRouter with cascading fallbacks
    */
+  /**
+   * High-accuracy, free multi-tier real-time translation (OpenRouter -> Cloudflare Edge AI -> MyMemory -> Local)
+   */
   async function translateText(text, srcLang, tgtLang) {
-    const apiKey = state.apiKey.trim();
-    if (!apiKey) {
-      return mockTranslate(text, tgtLang);
-    }
+    if (!text || !text.trim()) return '';
 
+    const apiKey = state.apiKey.trim();
     const srcName = getLanguageName(srcLang);
     const tgtName = getLanguageName(tgtLang);
+    const sCode = (srcLang || 'en').split('-')[0].toLowerCase();
+    const tCode = (tgtLang || 'fr').split('-')[0].toLowerCase();
 
-    const primaryModel = state.model === 'custom' 
-      ? (state.customModel.trim() || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free')
-      : state.model;
+    // 1. If OpenRouter API key provided, try OpenRouter first
+    if (apiKey) {
+      const primaryModel = state.model === 'custom' 
+        ? (state.customModel.trim() || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free')
+        : state.model;
 
-    // Resilient fallback models cascade
-    const candidateModels = [
-      primaryModel,
-      'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-      'nvidia/nemotron-3-super-120b-a12b:free',
-      'liquid/lfm-2.5-2.6b:free'
-    ];
-    const uniqueModels = [...new Set(candidateModels)];
+      const candidateModels = [
+        primaryModel,
+        'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+        'liquid/lfm-2.5-2.6b:free'
+      ];
+      const uniqueModels = [...new Set(candidateModels)];
 
-    for (const m of uniqueModels) {
-      try {
-        const result = await callOpenRouterCompletion(text, m, srcName, tgtName, apiKey);
-        if (result && result.trim()) {
-          return result.trim();
+      for (const m of uniqueModels) {
+        try {
+          const result = await callOpenRouterCompletion(text, m, srcName, tgtName, apiKey);
+          if (result && result.trim()) {
+            return result.trim();
+          }
+        } catch (err) {
+          console.warn(`Model ${m} failed (${err.message}), trying backup...`);
         }
-      } catch (err) {
-        console.warn(`Model ${m} failed (${err.message}), trying backup model...`);
       }
     }
 
-    console.warn('All online models failed or congested, using local fallback translator');
+    // 2. High-speed Cloudflare Edge AI (Zero API key required: French, Arabic, Spanish, etc.)
+    try {
+      const edgeUrl = `https://dubber.atmr.workers.dev/api/translate?text=${encodeURIComponent(text.trim())}&source=${sCode}&target=${tCode}`;
+      const edgeRes = await fetch(edgeUrl);
+      if (edgeRes.ok) {
+        const data = await edgeRes.json();
+        if (data && data.translatedText && data.translatedText.trim()) {
+          return data.translatedText.trim();
+        }
+      }
+    } catch (edgeErr) {
+      console.warn('Cloudflare edge translation error, falling back to MyMemory:', edgeErr);
+    }
+
+    // 3. MyMemory Free API fallback (Zero API key required)
+    try {
+      const mmUrl = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text.trim())}&langpair=${sCode}|${tCode}`;
+      const mmRes = await fetch(mmUrl);
+      if (mmRes.ok) {
+        const mmData = await mmRes.json();
+        if (mmData && mmData.responseData && mmData.responseData.translatedText) {
+          const txt = mmData.responseData.translatedText.trim();
+          if (txt && !txt.startsWith('MYMEMORY WARNING')) {
+            return txt;
+          }
+        }
+      }
+    } catch (mmErr) {
+      console.warn('MyMemory translation error:', mmErr);
+    }
+
+    // 4. Local multilingual offline dictionary fallback
     return mockTranslate(text, tgtLang);
   }
 
   /**
-   * Instant fallback translator when API key is unset or offline
+   * Instant offline fallback dictionary for common expressions
    */
   function mockTranslate(text, tgtLang) {
-    const prefix = `[${tgtLang.split('-')[0].toUpperCase()}]`;
-    // Basic phrase mappings for instant zero-config testing
-    const dict = {
+    const tCode = tgtLang.split('-')[0].toLowerCase();
+    const frDict = {
+      'hello': 'bonjour',
+      'welcome': 'bienvenue',
+      'today': "aujourd'hui",
+      'video': 'vidéo',
+      'technology': 'technologie',
+      'artificial intelligence': 'intelligence artificielle',
+      'how are you': 'comment allez-vous',
+      'thank you': 'merci',
+      'dubber': 'Dubber'
+    };
+    const arDict = {
+      'hello': 'مرحبا',
+      'welcome': 'أهلا وسهلا',
+      'today': 'اليوم',
+      'video': 'فيديو',
+      'technology': 'تكنولوجيا',
+      'artificial intelligence': 'الذكاء الاصطناعي',
+      'how are you': 'كيف حالك',
+      'thank you': 'شكرا',
+      'dubber': 'دبلر'
+    };
+    const esDict = {
       'hello': 'hola',
       'welcome': 'bienvenidos',
       'today': 'hoy',
@@ -918,17 +975,16 @@
       'technology': 'tecnología',
       'artificial intelligence': 'inteligencia artificial',
       'how are you': 'cómo estás',
-      'thank you': 'gracias'
+      'thank you': 'gracias',
+      'dubber': 'Dubber'
     };
 
-    let simplified = text.toLowerCase();
-    for (const [en, es] of Object.entries(dict)) {
-      if (tgtLang.startsWith('es') && simplified.includes(en)) {
-        return text.replace(new RegExp(en, 'gi'), es);
-      }
+    const dict = tCode === 'fr' ? frDict : (tCode === 'ar' ? arDict : esDict);
+    let res = text;
+    for (const [en, trans] of Object.entries(dict)) {
+      res = res.replace(new RegExp('\\b' + en + '\\b', 'gi'), trans);
     }
-
-    return `${text}`;
+    return res;
   }
 
   function getLanguageName(code) {
@@ -1052,9 +1108,12 @@
       const selected = voices.find(v => v.voiceURI === state.voiceUri);
       if (selected) utterance.voice = selected;
     } else {
-      // Match best voice for target language
-      const langPrefix = state.tgtLang.split('-')[0];
-      const match = voices.find(v => v.lang.startsWith(langPrefix));
+      // Match best voice for target language (case-insensitive, normalized)
+      const langPrefix = state.tgtLang.split('-')[0].toLowerCase();
+      const match = voices.find(v => {
+        const vl = (v.lang || '').toLowerCase().replace('_', '-');
+        return vl.startsWith(langPrefix);
+      });
       if (match) utterance.voice = match;
     }
 
@@ -1435,14 +1494,15 @@
     const voices = window.speechSynthesis.getVoices();
     elements.voiceSelect.innerHTML = '<option value="">Default System Voice</option>';
 
-    const targetPrefix = state.tgtLang.split('-')[0];
+    const targetPrefix = state.tgtLang.split('-')[0].toLowerCase();
     
     // Group voices: Target language first
     const matching = [];
     const others = [];
 
     voices.forEach(voice => {
-      if (voice.lang.startsWith(targetPrefix)) {
+      const vl = (voice.lang || '').toLowerCase().replace('_', '-');
+      if (vl.startsWith(targetPrefix)) {
         matching.push(voice);
       } else {
         others.push(voice);
@@ -1585,6 +1645,22 @@
       const currentSrc = elements.srcLangSelect.value;
       elements.srcLangSelect.value = elements.tgtLangSelect.value;
       elements.tgtLangSelect.value = currentSrc;
+      saveSettingsFromDrawer();
+      populateVoiceList();
+    });
+
+    elements.srcLangSelect.addEventListener('change', () => {
+      state.srcLang = elements.srcLangSelect.value;
+      localStorage.setItem(STORAGE_KEYS.SRC_LANG, state.srcLang);
+      elements.pillSrcBadge.textContent = state.srcLang.slice(0, 2).toUpperCase();
+      elements.labelSrcLang.textContent = getLanguageName(state.srcLang);
+    });
+
+    elements.tgtLangSelect.addEventListener('change', () => {
+      state.tgtLang = elements.tgtLangSelect.value;
+      localStorage.setItem(STORAGE_KEYS.TGT_LANG, state.tgtLang);
+      elements.pillTgtBadge.textContent = state.tgtLang.slice(0, 2).toUpperCase();
+      elements.labelTgtLang.textContent = getLanguageName(state.tgtLang);
       populateVoiceList();
     });
 

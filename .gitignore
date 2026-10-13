@@ -13,4 +13,5 @@ __pycache__/
 *.wav
 screenshot*.png
 mobile_*.png
+.wrangler/
 !android/app/src/main/res/**/*.png

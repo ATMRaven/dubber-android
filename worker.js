@@ -30,6 +30,67 @@ export default {
       });
     }
 
+    // Fast AI Translation endpoint
+    if (url.pathname === '/api/translate') {
+      try {
+        const text = url.searchParams.get('text') || '';
+        const source = (url.searchParams.get('source') || 'en').split('-')[0].toLowerCase();
+        const target = (url.searchParams.get('target') || 'fr').split('-')[0].toLowerCase();
+
+        if (!text || !text.trim()) {
+          return new Response(JSON.stringify({ translatedText: '' }), {
+            headers: {
+              'Content-Type': 'application/json',
+              'Access-Control-Allow-Origin': '*'
+            }
+          });
+        }
+
+        let translated = '';
+        if (env.AI) {
+          try {
+            // Use Llama 3.2 3B for high-fidelity translation
+            const langNames = {
+              en: 'English', fr: 'French', ar: 'Arabic', es: 'Spanish',
+              de: 'German', ja: 'Japanese', zh: 'Chinese', ko: 'Korean',
+              ru: 'Russian', it: 'Italian', pt: 'Portuguese', hi: 'Hindi'
+            };
+            const sName = langNames[source] || source;
+            const tName = langNames[target] || target;
+
+            const res = await env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
+              messages: [
+                { role: 'system', content: `You are an ultra-fast real-time translator. Translate the text from ${sName} into natural, accurate ${tName}. Return ONLY the direct translation text. Never add quotes, notes, explanations, or extra words.` },
+                { role: 'user', content: text.trim() }
+              ],
+              max_tokens: 200
+            });
+
+            if (res && res.response) {
+              translated = res.response.trim().replace(/^["']|["']$/g, '');
+            }
+          } catch (aiErr) {
+            console.warn('Worker AI translation failed:', aiErr);
+          }
+        }
+
+        return new Response(JSON.stringify({ translatedText: translated }), {
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message, translatedText: '' }), {
+          status: 500,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+      }
+    }
+
     // Speech-to-Text via Cloudflare Workers AI Whisper
     if (url.pathname === '/api/transcribe' && request.method === 'POST') {
       try {

@@ -6,6 +6,8 @@
   <meta name="theme-color" content="#18181b">
   <meta name="description" content="Dubber - Ultra-fast real-time speech translation and video audio dubbing utility.">
   <title>Dubber — Real-Time Voice Dubbing & Translation</title>
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="apple-touch-icon" href="icon-192.png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body class="theme-zinc">
@@ -74,21 +76,24 @@
   <main class="app-layout">
     <header class="app-header">
       <div class="brand">
-        <div class="brand-badge">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-            <line x1="12" y1="19" x2="12" y2="23"/>
-            <line x1="8" y1="23" x2="16" y2="23"/>
-          </svg>
+        <div class="brand-badge" style="background: transparent; padding: 0;">
+          <img src="favicon.png" width="32" height="32" alt="Dubber Logo" class="brand-logo-img" style="border-radius: 8px; display: block;">
         </div>
         <div class="brand-text">
           <h1>Dubber Studio</h1>
-          <span class="brand-sub">Real-Time Screen & Microphone Voice Dubbing</span>
+          <span class="brand-sub">Real-Time Screen & System Audio Voice Dubbing</span>
         </div>
       </div>
 
       <div class="header-actions">
+        <a href="https://github.com/ATMRaven/dubber-android/releases/latest/download/Dubber.apk" class="btn btn-primary btn-sm" id="headerApkBtn" target="_blank" rel="noopener" style="text-decoration: none; gap: 6px;" title="Download Android APK (Direct Install)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          Get APK (v1.1)
+        </a>
         <button type="button" class="btn btn-secondary btn-sm" id="headerTestSpeechBtn" title="Simulate a speech input to test pipeline">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <polygon points="5 3 19 12 5 21 5 3"/>
@@ -193,15 +198,17 @@
 
             <!-- Built-in audio speech samples for instant zero-permission testing -->
             <div class="sample-actions">
-              <span class="sample-label">Simulate Speech Utterance:</span>
-              <button type="button" class="btn btn-outline btn-xs test-utterance-btn" data-text="Hello and welcome to this video. Today we are going to explore modern technology and artificial intelligence.">
+              <button type="button" class="btn btn-outline btn-xs test-utterance-btn" data-text="Hello and welcome to Dubber. Today we explore real-time speech translation and video dubbing.">
                 EN: "Hello and welcome..."
+              </button>
+              <button type="button" class="btn btn-outline btn-xs test-utterance-btn" data-text="Bonjour et bienvenue sur Dubber. Nous explorons les technologies modernes et l'intelligence artificielle.">
+                FR: "Bonjour et bienvenue..."
+              </button>
+              <button type="button" class="btn btn-outline btn-xs test-utterance-btn" data-text="مرحبا بكم في دبلر. اليوم نستكشف الترجمة الفورية والذكاء الاصطناعي.">
+                AR: "مرحبا بكم في دبلر..."
               </button>
               <button type="button" class="btn btn-outline btn-xs test-utterance-btn" data-text="El aprendizaje automático y los modelos de lenguaje están transformando la traducción en tiempo real.">
                 ES: "El aprendizaje..."
-              </button>
-              <button type="button" class="btn btn-outline btn-xs test-utterance-btn" data-text="人工知能の急速な進化により、リアルタイム音声翻訳が身近になりました。">
-                JA: "人工知能の..."
               </button>
             </div>
           </div>

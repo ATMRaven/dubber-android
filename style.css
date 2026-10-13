@@ -1130,6 +1130,20 @@ body {
     padding-bottom: 96px;
   }
 
+  .brand-sub {
+    display: none !important;
+  }
+
+  .app-header {
+    padding: 8px 12px !important;
+    gap: 8px !important;
+    flex-wrap: wrap !important;
+  }
+
+  .brand h1 {
+    font-size: 15px !important;
+  }
+
   .floating-pill {
     top: auto !important;
     bottom: 12px !important;

@@ -6,6 +6,7 @@ import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
 import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioPlaybackCaptureConfiguration;
@@ -13,13 +14,12 @@ import android.media.AudioRecord;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
-import android.util.Base64;
+import android.os.Looper;
 import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
-
-import java.io.ByteArrayOutputStream;
 
 public class AudioCaptureService extends Service {
     private static final String TAG = "DubberAudioService";
@@ -43,6 +43,13 @@ public class AudioCaptureService extends Service {
     private AudioRecord audioRecord;
     private Thread recordingThread;
     private boolean isRecording = false;
+    private Handler mainHandler;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        mainHandler = new Handler(Looper.getMainLooper());
+    }
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -53,72 +60,108 @@ public class AudioCaptureService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) return START_NOT_STICKY;
 
-        String action = intent.getAction();
-        if (ACTION_START.equals(action)) {
-            startForegroundNotification();
-            Intent resultData = intent.getParcelableExtra(EXTRA_RESULT_DATA);
-            if (resultData != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startAudioCapture(resultData);
+        try {
+            String action = intent.getAction();
+            if (ACTION_START.equals(action)) {
+                // Android 14 requirement: startForeground with FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION must occur FIRST
+                startForegroundNotification();
+
+                Intent resultData;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    resultData = intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent.class);
+                } else {
+                    resultData = intent.getParcelableExtra(EXTRA_RESULT_DATA);
+                }
+
+                if (resultData != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startAudioCapture(resultData);
+                } else {
+                    Log.w(TAG, "AudioCaptureService started without valid resultData or API < Q");
+                }
+            } else if (ACTION_STOP.equals(action)) {
+                stopAudioCapture();
+                stopForeground(true);
+                stopSelf();
             }
-        } else if (ACTION_STOP.equals(action)) {
-            stopAudioCapture();
-            stopForeground(true);
-            stopSelf();
+        } catch (Throwable t) {
+            Log.e(TAG, "Unhandled exception in onStartCommand: " + t.getMessage(), t);
         }
 
         return START_NOT_STICKY;
     }
 
     private void startForegroundNotification() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                CHANNEL_ID,
-                "Dubber Background Audio Service",
-                NotificationManager.IMPORTANCE_LOW
-            );
-            channel.setDescription("Running real-time internal speech capture and translation in background");
-            NotificationManager manager = getSystemService(NotificationManager.class);
-            if (manager != null) {
-                manager.createNotificationChannel(channel);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                NotificationChannel channel = new NotificationChannel(
+                    CHANNEL_ID,
+                    "Dubber Audio Capture",
+                    NotificationManager.IMPORTANCE_LOW
+                );
+                channel.setDescription("Real-time speech capture and dubbing in background");
+                NotificationManager manager = getSystemService(NotificationManager.class);
+                if (manager != null) {
+                    manager.createNotificationChannel(channel);
+                }
             }
+
+            Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("Dubber Active")
+                .setContentText("Capturing and translating audio in real time")
+                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(true)
+                .build();
+
+            // Android 14+ (API 34+) REQUIRES ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+            } else {
+                startForeground(NOTIFICATION_ID, notification);
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "Failed to start foreground notification: " + t.getMessage(), t);
         }
-
-        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Dubber Active")
-            .setContentText("Capturing and translating audio in background")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(true)
-            .build();
-
-        startForeground(NOTIFICATION_ID, notification);
     }
 
     private void startAudioCapture(Intent resultData) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
 
-        MediaProjectionManager projectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-        if (projectionManager == null) return;
-
-        mediaProjection = projectionManager.getMediaProjection(android.app.Activity.RESULT_OK, resultData);
-        if (mediaProjection == null) {
-            Log.e(TAG, "MediaProjection was null");
-            return;
-        }
-
-        AudioPlaybackCaptureConfiguration config = new AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
-            .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-            .addMatchingUsage(AudioAttributes.USAGE_GAME)
-            .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-            .build();
-
-        final int sampleRate = 16000;
-        final int channelConfig = AudioFormat.CHANNEL_IN_MONO;
-        final int audioFormat = AudioFormat.ENCODING_PCM_16BIT;
-        int minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat);
-        int bufferSize = Math.max(minBufferSize, 4096);
-
         try {
+            MediaProjectionManager projectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+            if (projectionManager == null) {
+                Log.e(TAG, "MediaProjectionManager is null");
+                return;
+            }
+
+            mediaProjection = projectionManager.getMediaProjection(android.app.Activity.RESULT_OK, resultData);
+            if (mediaProjection == null) {
+                Log.e(TAG, "MediaProjection token creation failed (null)");
+                return;
+            }
+
+            // Android 14+ (API 34+) requires registering a callback on MediaProjection before use
+            mediaProjection.registerCallback(new MediaProjection.Callback() {
+                @Override
+                public void onStop() {
+                    super.onStop();
+                    Log.i(TAG, "MediaProjection stopped by Android system");
+                    stopAudioCapture();
+                }
+            }, mainHandler);
+
+            AudioPlaybackCaptureConfiguration config = new AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
+                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                .build();
+
+            final int sampleRate = 16000;
+            final int channelConfig = AudioFormat.CHANNEL_IN_MONO;
+            final int audioFormat = AudioFormat.ENCODING_PCM_16BIT;
+            int minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat);
+            int bufferSize = Math.max(minBufferSize, 4096);
+
             audioRecord = new AudioRecord.Builder()
                 .setAudioPlaybackCaptureConfig(config)
                 .setAudioFormat(new AudioFormat.Builder()
@@ -129,24 +172,34 @@ public class AudioCaptureService extends Service {
                 .setBufferSizeInBytes(bufferSize)
                 .build();
 
+            if (audioRecord.getState() != AudioRecord.STATE_INITIALIZED) {
+                Log.e(TAG, "AudioRecord could not initialize. State=" + audioRecord.getState());
+                return;
+            }
+
             audioRecord.startRecording();
             isRecording = true;
 
             recordingThread = new Thread(() -> {
                 byte[] buffer = new byte[bufferSize];
                 while (isRecording && audioRecord != null) {
-                    int read = audioRecord.read(buffer, 0, buffer.length);
-                    if (read > 0 && sListener != null) {
-                        byte[] chunk = new byte[read];
-                        System.arraycopy(buffer, 0, chunk, 0, read);
-                        sListener.onAudioChunk(chunk);
+                    try {
+                        int read = audioRecord.read(buffer, 0, buffer.length);
+                        if (read > 0 && sListener != null) {
+                            byte[] chunk = new byte[read];
+                            System.arraycopy(buffer, 0, chunk, 0, read);
+                            sListener.onAudioChunk(chunk);
+                        }
+                    } catch (Throwable t) {
+                        Log.e(TAG, "Error in audio capture loop: " + t.getMessage());
+                        break;
                     }
                 }
             }, "Dubber-AudioCaptureThread");
             recordingThread.start();
             Log.i(TAG, "Internal AudioCapture started successfully at 16kHz Mono");
-        } catch (SecurityException | IllegalArgumentException e) {
-            Log.e(TAG, "Error initializing AudioRecord: " + e.getMessage(), e);
+        } catch (Throwable e) {
+            Log.e(TAG, "Error initializing AudioPlaybackCapture: " + e.getMessage(), e);
         }
     }
 
@@ -156,18 +209,22 @@ public class AudioCaptureService extends Service {
             try {
                 audioRecord.stop();
                 audioRecord.release();
-            } catch (Exception ignored) {}
+            } catch (Throwable ignored) {}
             audioRecord = null;
         }
         if (mediaProjection != null) {
-            mediaProjection.stop();
+            try {
+                mediaProjection.stop();
+            } catch (Throwable ignored) {}
             mediaProjection = null;
         }
         if (recordingThread != null) {
-            recordingThread.interrupt();
+            try {
+                recordingThread.interrupt();
+            } catch (Throwable ignored) {}
             recordingThread = null;
         }
-        Log.i(TAG, "Internal AudioCapture stopped");
+        Log.i(TAG, "Internal AudioCapture stopped cleanly");
     }
 
     @Override
