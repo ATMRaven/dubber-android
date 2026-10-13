@@ -62,7 +62,7 @@
     voiceUri: localStorage.getItem(STORAGE_KEYS.VOICE_URI) || '',
     voiceRate: parseFloat(localStorage.getItem(STORAGE_KEYS.VOICE_RATE)) || 1.10,
     voicePitch: parseFloat(localStorage.getItem(STORAGE_KEYS.VOICE_PITCH)) || 1.00,
-    openRouterVoiceSlug: 'deepgram/flux-tts',
+    openRouterVoiceSlug: localStorage.getItem('dubber_or_voice_slug') || 'openai/tts-1',
 
     // Dynamic Audio Ducking
     duckingEnabled: localStorage.getItem(STORAGE_KEYS.DUCKING_ENABLED) !== 'false',
@@ -1162,7 +1162,7 @@
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: state.openRouterVoiceSlug || 'deepgram/flux-tts',
+          model: state.openRouterVoiceSlug || 'openai/tts-1',
           input: text,
           voice: 'alloy'
         })
@@ -1568,11 +1568,14 @@
     localStorage.setItem(STORAGE_KEYS.MODEL, state.model);
     localStorage.setItem(STORAGE_KEYS.CUSTOM_MODEL, state.customModel);
 
-    // TTS
     state.ttsEngine = elements.ttsEngineSelect.value;
     state.voiceUri = elements.voiceSelect.value;
     state.voiceRate = parseFloat(elements.voiceRateSlider.value);
     state.voicePitch = parseFloat(elements.voicePitchSlider.value);
+    if (elements.openRouterVoiceSlug) {
+      state.openRouterVoiceSlug = elements.openRouterVoiceSlug.value.trim() || 'openai/tts-1';
+      localStorage.setItem('dubber_or_voice_slug', state.openRouterVoiceSlug);
+    }
     localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, state.ttsEngine);
     localStorage.setItem(STORAGE_KEYS.VOICE_URI, state.voiceUri);
     localStorage.setItem(STORAGE_KEYS.VOICE_RATE, state.voiceRate);
@@ -1848,8 +1851,10 @@
       elements.customModelInput.value = state.customModel;
     }
 
-    // Voice & Ducking
     elements.ttsEngineSelect.value = state.ttsEngine;
+    if (elements.openRouterVoiceSlug) {
+      elements.openRouterVoiceSlug.value = state.openRouterVoiceSlug;
+    }
     elements.voiceRateSlider.value = state.voiceRate;
     elements.voiceRateVal.textContent = `${state.voiceRate.toFixed(2)}x`;
     elements.voicePitchSlider.value = state.voicePitch;
