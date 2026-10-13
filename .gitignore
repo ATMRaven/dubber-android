@@ -1,0 +1,14 @@
+node_modules/
+.DS_Store
+*.log
+android/app/build/
+android/.gradle/
+android/build/
+android/local.properties
+android/captures/
+.gradle/
+pages_dist/
+__pycache__/
+*.pyc
+*.wav
+*.png

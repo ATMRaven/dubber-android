@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#18181b">
+  <meta name="description" content="Dubber - Ultra-fast real-time speech translation and video audio dubbing utility.">
+  <title>Dubber — Real-Time Voice Dubbing & Translation</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="theme-zinc">
+
+  <!-- =========================================================================
+       1. DRAGGABLE FLOATING PILL (Overlay Controller)
+       ========================================================================= -->
+  <aside id="floatingPill" class="floating-pill" role="region" aria-label="Dubber Floating Controls">
+    <!-- Drag Handle -->
+    <button type="button" class="pill-grip" id="pillGrip" aria-label="Drag control pill" title="Drag to reposition">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+        <circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/>
+        <circle cx="5" cy="8" r="1.5"/><circle cx="11" cy="8" r="1.5"/>
+        <circle cx="5" cy="12" r="1.5"/><circle cx="11" cy="12" r="1.5"/>
+      </svg>
+    </button>
+
+    <!-- Master Dub Toggle -->
+    <button type="button" id="pillToggleBtn" class="pill-btn pill-btn-primary" aria-label="Start Real-Time Dubbing" title="Toggle Real-Time Dubbing">
+      <span class="btn-icon" id="pillToggleIcon">
+        <!-- Play SVG -->
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <polygon points="5 3 19 12 5 21 5 3"/>
+        </svg>
+      </span>
+      <span class="pill-btn-label" id="pillToggleLabel">Start Dub</span>
+    </button>
+
+    <!-- Status Indicator LED & State -->
+    <div class="pill-status" id="pillStatus" title="System Status: Idle">
+      <span class="status-dot status-idle" id="statusDot"></span>
+      <span class="status-text" id="statusText">Ready</span>
+    </div>
+
+    <!-- Active Language Badge -->
+    <button type="button" class="pill-lang-badge" id="pillLangBadge" title="Click to configure languages" aria-label="Language pair: English to Spanish">
+      <span id="pillSrcBadge">EN</span>
+      <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M3 8h10M9 4l4 4-4 4"/>
+      </svg>
+      <span id="pillTgtBadge">ES</span>
+    </button>
+
+    <!-- Mini Audio VU Meter -->
+    <div class="pill-vu-meter" id="pillVuMeter" title="Live audio input level">
+      <div class="vu-bar" id="vuBar"></div>
+    </div>
+
+    <!-- Live Subtitle Ticker -->
+    <div class="pill-ticker" id="pillTicker" aria-live="polite">
+      <div class="ticker-content" id="tickerText">Dubber ready. Tap Start Dub to translate live audio.</div>
+    </div>
+
+    <!-- Settings Drawer Toggle Button -->
+    <button type="button" class="pill-btn pill-btn-icon" id="openDrawerBtn" aria-label="Open Settings Drawer" title="Open Settings Drawer">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
+  </aside>
+
+  <!-- =========================================================================
+       2. WORKSPACE / MAIN STAGE (Dashboard & Real-Time Studio)
+       ========================================================================= -->
+  <main class="app-layout">
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-badge">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>Dubber Studio</h1>
+          <span class="brand-sub">Real-Time Screen & Microphone Voice Dubbing</span>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <button type="button" class="btn btn-secondary btn-sm" id="headerTestSpeechBtn" title="Simulate a speech input to test pipeline">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          Quick Test Dub
+        </button>
+        <button type="button" class="btn btn-secondary btn-sm" id="headerSettingsBtn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          Settings
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Studio Grid -->
+    <div class="studio-grid">
+      <!-- Live Monitoring & Subtitle Card -->
+      <section class="card monitor-card">
+        <div class="card-header">
+          <div class="card-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+              <line x1="8" y1="21" x2="16" y2="21"/>
+              <line x1="12" y1="17" x2="12" y2="21"/>
+            </svg>
+            <h2>Live Subtitles & Simultaneous Translation</h2>
+          </div>
+          <div class="monitor-stats">
+            <span class="stat-pill" id="statSource">Source: <strong>Mic</strong></span>
+            <span class="stat-pill" id="statDucking">Ducking: <strong id="statDuckingVal">Active (-80%)</strong></span>
+            <span class="stat-pill" id="statEngine">Engine: <strong id="statEngineVal">SpeechSynth (Fast)</strong></span>
+          </div>
+        </div>
+
+        <!-- Live Subtitle Display Box -->
+        <div class="subtitle-stage">
+          <div class="subtitle-box original-box">
+            <div class="box-label">
+              <span>Original Speech</span>
+              <span class="lang-tag" id="labelSrcLang">English (US)</span>
+            </div>
+            <div class="transcript-display" id="liveOriginalTranscript">
+              <span class="placeholder-text">Listening for speech... (Start dubbing or play a video)</span>
+            </div>
+          </div>
+
+          <div class="subtitle-box translated-box">
+            <div class="box-label">
+              <span>Translated Dubbing</span>
+              <span class="lang-tag lang-target" id="labelTgtLang">Spanish (ES)</span>
+            </div>
+            <div class="transcript-display highlight-display" id="liveTranslatedTranscript">
+              <span class="placeholder-text">Translated audio will synthesize and play here...</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Audio Oscilloscope Visualizer -->
+        <div class="visualizer-container">
+          <div class="visualizer-header">
+            <span class="vis-label">Audio Signal Spectrum & Level</span>
+            <span class="vis-db" id="visDbLevel">-∞ dB</span>
+          </div>
+          <canvas id="audioVisualizerCanvas" width="800" height="80"></canvas>
+        </div>
+      </section>
+
+      <!-- Interactive Test Bench & YouTube Integration -->
+      <section class="card testbench-card">
+        <div class="card-header">
+          <div class="card-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M22.54 6.42a2.78 2.78 0 0 0-1.94-2C18.88 4 12 4 12 4s-6.88 0-8.6.46a2.78 2.78 0 0 0-1.94 2A29 29 0 0 0 1 11.75a29 29 0 0 0 .46 5.33A2.78 2.78 0 0 0 3.4 19c1.72.46 8.6.46 8.6.46s6.88 0 8.6-.46a2.78 2.78 0 0 0 1.94-2 29 29 0 0 0 .46-5.25 29 29 0 0 0-.46-5.33z"/>
+              <polygon points="9.75 15.02 15.5 11.75 9.75 8.48 9.75 15.02"/>
+            </svg>
+            <h2>Built-in Video Test Bench & Audio Playground</h2>
+          </div>
+          <span class="card-badge">Instant Verification</span>
+        </div>
+
+        <p class="section-desc">
+          Test real-time screen capture, speech translation, and dynamic audio ducking right here without opening another tab.
+        </p>
+
+        <!-- YouTube Video Frame / Media Player -->
+        <div class="media-bench">
+          <div class="video-container" id="videoContainer">
+            <iframe id="youtubePlayer" 
+                    src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?enablejsapi=1" 
+                    title="YouTube video player" 
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
+                    allowfullscreen>
+            </iframe>
+          </div>
+
+          <div class="testbench-controls">
+            <div class="input-row">
+              <input type="text" id="youtubeUrlInput" class="form-input" placeholder="Paste YouTube Video URL or ID (e.g. jNQXAC9IVRw)">
+              <button type="button" id="loadYoutubeBtn" class="btn btn-secondary">Load Video</button>
+            </div>
+
+            <!-- Built-in audio speech samples for instant zero-permission testing -->
+            <div class="sample-actions">
+              <span class="sample-label">Simulate Speech Utterance:</span>
+              <button type="button" class="btn btn-outline btn-xs test-utterance-btn" data-text="Hello and welcome to this video. Today we are going to explore modern technology and artificial intelligence.">
+                EN: "Hello and welcome..."
+              </button>
+              <button type="button" class="btn btn-outline btn-xs test-utterance-btn" data-text="El aprendizaje automático y los modelos de lenguaje están transformando la traducción en tiempo real.">
+                ES: "El aprendizaje..."
+              </button>
+              <button type="button" class="btn btn-outline btn-xs test-utterance-btn" data-text="人工知能の急速な進化により、リアルタイム音声翻訳が身近になりました。">
+                JA: "人工知能の..."
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Live Transcript History Table -->
+    <section class="card transcript-card">
+      <div class="card-header">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="16" y1="13" x2="8" y2="13"/>
+            <line x1="16" y1="17" x2="8" y2="17"/>
+            <polyline points="10 9 9 9 8 9"/>
+          </svg>
+          <h2>Live Transcript & Dubbing Session Log</h2>
+        </div>
+        <div class="card-actions">
+          <button type="button" class="btn btn-secondary btn-xs" id="copyTranscriptBtn" title="Copy transcript to clipboard">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+            Copy All
+          </button>
+          <button type="button" class="btn btn-secondary btn-xs" id="downloadTranscriptBtn" title="Download SRT Subtitle file">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Export .SRT
+          </button>
+          <button type="button" class="btn btn-ghost btn-xs" id="clearTranscriptBtn" title="Clear log">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+            </svg>
+            Clear
+          </button>
+        </div>
+      </div>
+
+      <div class="transcript-log-wrap">
+        <table class="transcript-table">
+          <thead>
+            <tr>
+              <th class="col-time">Time</th>
+              <th class="col-orig">Original Utterance</th>
+              <th class="col-trans">Translated Dub</th>
+              <th class="col-action">Action</th>
+            </tr>
+          </thead>
+          <tbody id="transcriptLogBody">
+            <tr class="empty-row" id="emptyLogPrompt">
+              <td colspan="4">No spoken utterances recorded yet. Tap "Start Dub" or click a sample phrase above.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- =========================================================================
+       3. SLIDE-OUT SETTINGS & CONFIGURATION DRAWER
+       ========================================================================= -->
+  <div class="drawer-backdrop" id="drawerBackdrop" aria-hidden="true"></div>
+  <div class="drawer" id="settingsDrawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
+    <div class="drawer-header">
+      <div class="drawer-title-wrap">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+        <h2 id="drawerTitle">Dubber Configuration</h2>
+      </div>
+      <button type="button" class="btn btn-ghost btn-icon" id="closeDrawerBtn" aria-label="Close Settings Drawer">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="drawer-body">
+      <!-- Section A: Audio Capture Mode -->
+      <section class="drawer-section">
+        <h3 class="section-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          </svg>
+          Audio Capture Source
+        </h3>
+        <p class="section-hint">Select how Dubber captures speech audio.</p>
+        
+        <div class="radio-card-group">
+          <label class="radio-card">
+            <input type="radio" name="audioSourceType" value="display" checked id="sourceDisplayRadio">
+            <div class="radio-card-body">
+              <div class="radio-card-header">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                  <line x1="8" y1="21" x2="16" y2="21"/>
+                  <line x1="12" y1="17" x2="12" y2="21"/>
+                </svg>
+                <span class="radio-card-title">Screen / Tab Audio (Direct YouTube)</span>
+              </div>
+              <span class="radio-card-desc">Captures crisp internal audio from your YouTube tab or whole screen with zero acoustic feedback (optimal for headphones/earbuds).</span>
+            </div>
+          </label>
+
+          <label class="radio-card">
+            <input type="radio" name="audioSourceType" value="microphone" id="sourceMicRadio">
+            <div class="radio-card-body">
+              <div class="radio-card-header">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                  <line x1="12" y1="19" x2="12" y2="23"/>
+                </svg>
+                <span class="radio-card-title">Microphone (Ambient / Mobile)</span>
+              </div>
+              <span class="radio-card-desc">Captures loudspeaker audio from phone or external mic.</span>
+            </div>
+          </label>
+        </div>
+
+        <div class="form-check mt-3">
+          <label class="checkbox-label">
+            <input type="checkbox" id="micLoopbackToggle">
+            <span>Enable Mic Audio Passthrough (Headphones recommended to avoid echo)</span>
+          </label>
+        </div>
+      </section>
+
+      <!-- Section B: Languages Pair -->
+      <section class="drawer-section">
+        <h3 class="section-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="2" y1="12" x2="22" y2="12"/>
+            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+          </svg>
+          Language Configuration
+        </h3>
+
+        <div class="grid-2col">
+          <div class="form-group">
+            <label for="srcLangSelect" class="form-label">Source Language (Speech)</label>
+            <select id="srcLangSelect" class="form-select">
+              <option value="en-US">English (United States)</option>
+              <option value="en-GB">English (United Kingdom)</option>
+              <option value="es-ES">Spanish (Spain)</option>
+              <option value="es-MX">Spanish (Mexico)</option>
+              <option value="fr-FR">French (France)</option>
+              <option value="de-DE">German (Germany)</option>
+              <option value="ja-JP">Japanese (Japan)</option>
+              <option value="zh-CN">Chinese (Simplified Mandarin)</option>
+              <option value="ko-KR">Korean (South Korea)</option>
+              <option value="ar-SA">Arabic (Saudi Arabia)</option>
+              <option value="ru-RU">Russian (Russia)</option>
+              <option value="pt-BR">Portuguese (Brazil)</option>
+              <option value="it-IT">Italian (Italy)</option>
+              <option value="hi-IN">Hindi (India)</option>
+              <option value="tr-TR">Turkish (Turkey)</option>
+              <option value="nl-NL">Dutch (Netherlands)</option>
+              <option value="pl-PL">Polish (Poland)</option>
+              <option value="id-ID">Indonesian</option>
+              <option value="vi-VN">Vietnamese</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="tgtLangSelect" class="form-label">Target Language (Dubbing)</label>
+            <select id="tgtLangSelect" class="form-select">
+              <option value="es-ES" selected>Spanish (Español)</option>
+              <option value="en-US">English (English)</option>
+              <option value="fr-FR">French (Français)</option>
+              <option value="de-DE">German (Deutsch)</option>
+              <option value="ja-JP">Japanese (日本語)</option>
+              <option value="zh-CN">Chinese (中文)</option>
+              <option value="ko-KR">Korean (한국어)</option>
+              <option value="ar-SA">Arabic (العربية)</option>
+              <option value="ru-RU">Russian (Русский)</option>
+              <option value="pt-BR">Portuguese (Português)</option>
+              <option value="it-IT">Italian (Italiano)</option>
+              <option value="hi-IN">Hindi (हिन्दी)</option>
+              <option value="tr-TR">Turkish (Türkçe)</option>
+              <option value="nl-NL">Dutch (Nederlands)</option>
+              <option value="pl-PL">Polish (Polski)</option>
+            </select>
+          </div>
+        </div>
+
+        <button type="button" class="btn btn-ghost btn-xs mt-2" id="swapLangsBtn">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <polyline points="17 1 21 5 17 9"/>
+            <path d="M3 11V9a4 4 0 0 1 4-4h14"/>
+            <polyline points="7 23 3 19 7 15"/>
+            <path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+          </svg>
+          Swap Languages
+        </button>
+      </section>
+
+      <!-- Section C: Translation API (OpenRouter) -->
+      <section class="drawer-section">
+        <h3 class="section-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+          </svg>
+          Real-Time Translation Engine (OpenRouter)
+        </h3>
+        <p class="section-hint">Translates speech chunks simultaneously using fast free LLMs.</p>
+
+        <div class="form-group">
+          <div class="label-with-action">
+            <label for="openRouterKeyInput" class="form-label">OpenRouter API Key</label>
+            <span class="badge badge-success" id="keyStatusBadge">Checking...</span>
+          </div>
+          <div class="input-with-btn">
+            <input type="password" id="openRouterKeyInput" class="form-input" placeholder="sk-or-v1-..." autocomplete="off">
+            <button type="button" class="btn btn-secondary btn-icon" id="toggleKeyVisibilityBtn" title="Show/Hide Key">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+            </button>
+          </div>
+          <span class="field-hint">Your API key is kept locally in browser storage and never uploaded to third-party servers.</span>
+        </div>
+
+        <div class="form-group">
+          <label for="modelSelect" class="form-label">Translation Model Slug</label>
+          <select id="modelSelect" class="form-select">
+            <option value="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" selected>nvidia/nemotron-3-nano-omni-30b:free (Ultra-Fast ~400ms, Free)</option>
+            <option value="nvidia/nemotron-3-super-120b-a12b:free">nvidia/nemotron-3-super-120b:free (High Accuracy, Free)</option>
+            <option value="liquid/lfm-2.5-2.6b:free">liquid/lfm-2.5-2.6b:free (Edge Free)</option>
+            <option value="google/gemma-4-26b-a4b-it:free">google/gemma-4-26b:free (Google Gemma, Free)</option>
+            <option value="deepseek/deepseek-chat">deepseek/deepseek-chat (High Quality)</option>
+            <option value="custom">Custom Model Slug...</option>
+          </select>
+          <input type="text" id="customModelInput" class="form-input mt-2 hidden" placeholder="Enter custom model slug (e.g. nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free)">
+        </div>
+
+        <button type="button" class="btn btn-secondary btn-sm" id="testApiKeyBtn">
+          Test OpenRouter Connection
+        </button>
+      </section>
+
+      <!-- Section D: Text-to-Speech (TTS) Synthesis -->
+      <section class="drawer-section">
+        <h3 class="section-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>
+          </svg>
+          Dubbing Voice Synthesis (TTS)
+        </h3>
+
+        <div class="form-group">
+          <label for="ttsEngineSelect" class="form-label">TTS Engine</label>
+          <select id="ttsEngineSelect" class="form-select">
+            <option value="speechSynthesis">On-Device SpeechSynthesis (Edge/Chrome/Android - Instant & 100% Free)</option>
+            <option value="openrouter">OpenRouter Audio / TTS Endpoint</option>
+          </select>
+        </div>
+
+        <div class="form-group" id="speechSynthVoiceGroup">
+          <div class="label-with-action">
+            <label for="voiceSelect" class="form-label">Installed Voice</label>
+            <button type="button" class="btn-link" id="refreshVoicesBtn">Reload Voices</button>
+          </div>
+          <select id="voiceSelect" class="form-select">
+            <option value="">Default System Voice</option>
+          </select>
+        </div>
+
+        <div class="form-group hidden" id="openRouterVoiceGroup">
+          <label for="openRouterVoiceSlug" class="form-label">OpenRouter Audio Model / Voice</label>
+          <input type="text" id="openRouterVoiceSlug" class="form-input" placeholder="e.g. deepgram/flux-tts or openai/tts-1" value="deepgram/flux-tts">
+        </div>
+
+        <!-- Voice Sliders -->
+        <div class="slider-grid">
+          <div class="slider-group">
+            <div class="slider-label">
+              <label for="voiceRateSlider">Speed (Rate)</label>
+              <span class="slider-val" id="voiceRateVal">1.10x</span>
+            </div>
+            <input type="range" id="voiceRateSlider" min="0.75" max="1.8" step="0.05" value="1.1" class="form-range">
+          </div>
+
+          <div class="slider-group">
+            <div class="slider-label">
+              <label for="voicePitchSlider">Pitch</label>
+              <span class="slider-val" id="voicePitchVal">1.00x</span>
+            </div>
+            <input type="range" id="voicePitchSlider" min="0.8" max="1.4" step="0.05" value="1.0" class="form-range">
+          </div>
+        </div>
+
+        <button type="button" class="btn btn-secondary btn-sm mt-3" id="testVoiceBtn">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          Test Dubbing Voice
+        </button>
+      </section>
+
+      <!-- Section E: Dynamic Audio Ducking -->
+      <section class="drawer-section">
+        <h3 class="section-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M3 18v-6a9 9 0 0 1 18 0v6"/>
+            <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/>
+          </svg>
+          Dynamic Web Audio Ducking
+        </h3>
+        <p class="section-hint">Smoothly attenuates source video audio whenever translated voice speaks.</p>
+
+        <div class="form-check">
+          <label class="checkbox-label">
+            <input type="checkbox" id="duckingEnabledCheck" checked>
+            <span>Enable Real-Time Audio Ducking</span>
+          </label>
+        </div>
+
+        <div class="slider-group mt-3">
+          <div class="slider-label">
+            <label for="duckingDepthSlider">Ducking Depth (Background Volume)</label>
+            <span class="slider-val" id="duckingDepthVal">20% (-80% duck)</span>
+          </div>
+          <input type="range" id="duckingDepthSlider" min="5" max="50" step="5" value="20" class="form-range">
+          <span class="field-hint">Lower percentage keeps source video quieter while translated dub speaks.</span>
+        </div>
+      </section>
+    </div>
+
+    <!-- Drawer Footer -->
+    <div class="drawer-footer">
+      <button type="button" class="btn btn-secondary" id="resetDefaultsBtn">Reset Defaults</button>
+      <button type="button" class="btn btn-primary" id="saveDrawerBtn">Done</button>
+    </div>
+  </div>
+
+  <!-- Toast Notification Center -->
+  <div id="toastContainer" class="toast-container" aria-live="assertive"></div>
+
+  <!-- Audio Element for sound effects / test audio -->
+  <audio id="demoAudioPlayer" preload="none"></audio>
+
+  <!-- Application Script -->
+  <script src="app.js"></script>
+</body>
+</html>

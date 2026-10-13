@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Dubber</string>
+    <string name="title_activity_main">Dubber</string>
+    <string name="package_name">com.dubber.app</string>
+    <string name="custom_url_scheme">com.dubber.app</string>
+</resources>
