@@ -58,7 +58,7 @@
     customModel: localStorage.getItem(STORAGE_KEYS.CUSTOM_MODEL) || '',
 
     // TTS & Voice
-    ttsEngine: localStorage.getItem(STORAGE_KEYS.TTS_ENGINE) || 'speechSynthesis',
+    ttsEngine: localStorage.getItem(STORAGE_KEYS.TTS_ENGINE) || 'deepgram',
     voiceUri: localStorage.getItem(STORAGE_KEYS.VOICE_URI) || '',
     voiceRate: parseFloat(localStorage.getItem(STORAGE_KEYS.VOICE_RATE)) || 1.10,
     voicePitch: parseFloat(localStorage.getItem(STORAGE_KEYS.VOICE_PITCH)) || 1.00,
@@ -1078,10 +1078,60 @@
     applyDucking(true);
     setStatus('dubbing');
 
-    if (state.ttsEngine === 'speechSynthesis') {
+    if (state.ttsEngine === 'deepgram') {
+      playDeepgramAudioChunk(chunk);
+    } else if (state.ttsEngine === 'speechSynthesis') {
       playSpeechSynthesisChunk(chunk);
     } else {
       playOpenRouterAudioChunk(chunk);
+    }
+  }
+
+  /**
+   * Deepgram Aura-2 High-Speed Speech Synthesis
+   */
+  async function playDeepgramAudioChunk(text) {
+    const langPrefix = state.tgtLang.split('-')[0].toLowerCase();
+    // Deepgram Aura-2 natively supports French (fr), German (de), Spanish (es), English (en), Dutch (nl), Italian (it), Japanese (ja)
+    // For Arabic, fallback to SpeechSynthesis
+    if (langPrefix === 'ar') {
+      playSpeechSynthesisChunk(text);
+      return;
+    }
+
+    try {
+      const url = 'https://dubber.atmr.workers.dev/api/deepgram/tts';
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: text,
+          target: state.tgtLang
+        })
+      });
+
+      if (!res.ok) {
+        throw new Error(`Deepgram TTS HTTP ${res.status}`);
+      }
+
+      const arrayBuffer = await res.arrayBuffer();
+      const ctx = initAudioContext();
+      if (ctx.state === 'suspended') await ctx.resume();
+      const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+
+      const sourceNode = ctx.createBufferSource();
+      sourceNode.buffer = audioBuffer;
+      sourceNode.playbackRate.value = state.voiceRate;
+      sourceNode.connect(ctx.destination);
+
+      sourceNode.onended = () => {
+        processNextAudioChunk();
+      };
+
+      sourceNode.start(0);
+    } catch (err) {
+      console.warn('Deepgram TTS failed, falling back to SpeechSynthesis:', err.message);
+      playSpeechSynthesisChunk(text);
     }
   }
 
@@ -1581,7 +1631,9 @@
     localStorage.setItem(STORAGE_KEYS.VOICE_RATE, state.voiceRate);
     localStorage.setItem(STORAGE_KEYS.VOICE_PITCH, state.voicePitch);
 
-    elements.statEngineVal.textContent = state.ttsEngine === 'speechSynthesis' ? 'SpeechSynth (Fast)' : 'OpenRouter TTS';
+    elements.statEngineVal.textContent = state.ttsEngine === 'deepgram' 
+      ? 'Deepgram Aura-2 (<200ms)' 
+      : (state.ttsEngine === 'speechSynthesis' ? 'SpeechSynth (Fast)' : 'OpenRouter TTS');
 
     // Ducking
     state.duckingEnabled = elements.duckingEnabledCheck.checked;
@@ -1686,8 +1738,14 @@
     elements.ttsEngineSelect.addEventListener('change', () => {
       if (elements.ttsEngineSelect.value === 'openrouter') {
         elements.openRouterVoiceGroup.classList.remove('hidden');
-      } else {
+        elements.speechSynthVoiceGroup.classList.add('hidden');
+      } else if (elements.ttsEngineSelect.value === 'speechSynthesis') {
         elements.openRouterVoiceGroup.classList.add('hidden');
+        elements.speechSynthVoiceGroup.classList.remove('hidden');
+      } else {
+        // Deepgram Aura-2
+        elements.openRouterVoiceGroup.classList.add('hidden');
+        elements.speechSynthVoiceGroup.classList.add('hidden');
       }
     });
 
