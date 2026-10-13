@@ -11,4 +11,6 @@ pages_dist/
 __pycache__/
 *.pyc
 *.wav
-*.png
+screenshot*.png
+mobile_*.png
+!android/app/src/main/res/**/*.png
