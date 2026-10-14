@@ -109,11 +109,11 @@ public class AudioCaptureService extends Service {
     private volatile boolean isPlayingDubbedAudio = false;
     private AudioFocusRequest nativeAudioFocusRequest = null;
 
-    // Dubbing pipeline settings (French default)
+    // Dubbing pipeline settings (French default: Deepgram Aura-2 Agathe for natural studio narration)
     private String srcLang = "en";
     private String targetLang = "fr";
-    private String voice = "fr_marie_happy";
-    private String engine = "mistral";
+    private String voice = "aura-2-agathe-fr";
+    private String engine = "deepgram";
 
     @Override
     public void onCreate() {
@@ -124,6 +124,12 @@ public class AudioCaptureService extends Service {
                 if (status == android.speech.tts.TextToSpeech.SUCCESS && systemTts != null) {
                     try {
                         systemTts.setLanguage(new java.util.Locale(targetLang));
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                            systemTts.setAudioAttributes(new AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build());
+                        }
                     } catch (Throwable ignored) {}
                 }
             });
@@ -330,13 +336,11 @@ public class AudioCaptureService extends Service {
                 boolean isSpeechActive = false;
                 int silenceFrames = 0;
 
-                // Native VAD thresholds with Launchpad Chunking for instant TTFA
-                final int SPEECH_THRESHOLD_RMS = 160;
-                final int SILENCE_FRAMES_TRIGGER = 2;       // ~220ms pause -> instant phrase/breath cut!
-                final int FIRST_CHUNK_BYTES = 32000;        // ~1.0s launchpad chunk (cuts first phrase latency in half!)
-                final int CONTINUOUS_CHUNK_BYTES = 56000;   // ~1.75s continuous chunk
-                final int MIN_SPEECH_BYTES = 9600;          // ~0.3s min phrase chunk
-                boolean isFirstChunkOfUtterance = true;
+                // Sentence-level VAD thresholds: calibrated for natural complete sentences & noise rejection
+                final int SPEECH_THRESHOLD_RMS = 240;       // Higher barrier: cleanly rejects ambient game rumble & background sound effects
+                final int SILENCE_FRAMES_TRIGGER = 6;       // ~500ms true pause: commas/breaths will not cut the sentence in half!
+                final int MIN_SPEECH_BYTES = 40000;         // ~1.25s min chunk (rejects 1-word splinters)
+                final int MAX_SPEECH_BYTES = 144000;        // ~4.5s max phrase cut (prevents runaway buffer)
 
                 while (isRecording && audioRecord != null) {
                     try {
@@ -410,37 +414,33 @@ public class AudioCaptureService extends Service {
                         // 4. Compute RMS energy across the 16kHz window
                         double rms = Math.sqrt((double) sum / samples16k.length);
 
-                        int maxBytesForCurrentChunk = isFirstChunkOfUtterance ? FIRST_CHUNK_BYTES : CONTINUOUS_CHUNK_BYTES;
-
                         if (rms >= SPEECH_THRESHOLD_RMS) {
                             if (!isSpeechActive) {
                                 isSpeechActive = true;
-                                isFirstChunkOfUtterance = true;
                                 speechBuffer.reset();
                             }
                             silenceFrames = 0;
                             speechBuffer.write(pcm16k, 0, pcm16k.length);
 
-                            // Forced cut: dispatch when phrase buffer hits max length
-                            if (speechBuffer.size() >= maxBytesForCurrentChunk) {
+                            // Forced cut: only if continuous monologue hits 4.5s max length
+                            if (speechBuffer.size() >= MAX_SPEECH_BYTES) {
                                 byte[] chunk = speechBuffer.toByteArray();
                                 speechBuffer.reset();
-                                isFirstChunkOfUtterance = false;
+                                isSpeechActive = false;
                                 dispatchToEdgeDubber(chunk);
                             }
                         } else if (isSpeechActive) {
                             speechBuffer.write(pcm16k, 0, pcm16k.length);
                             silenceFrames++;
 
-                            if (silenceFrames >= SILENCE_FRAMES_TRIGGER || speechBuffer.size() >= maxBytesForCurrentChunk) {
-                                if (speechBuffer.size() >= MIN_SPEECH_BYTES) {
-                                    byte[] chunk = speechBuffer.toByteArray();
-                                    isFirstChunkOfUtterance = false;
-                                    dispatchToEdgeDubber(chunk);
-                                }
+                            // Natural pause cut: triggers when speaker pauses for ~500ms AND has formed a real sentence (>= 1.25s)
+                            if ((silenceFrames >= SILENCE_FRAMES_TRIGGER && speechBuffer.size() >= MIN_SPEECH_BYTES)
+                                || speechBuffer.size() >= MAX_SPEECH_BYTES) {
+                                byte[] chunk = speechBuffer.toByteArray();
                                 speechBuffer.reset();
                                 isSpeechActive = false;
                                 silenceFrames = 0;
+                                dispatchToEdgeDubber(chunk);
                             }
                         }
                     } catch (Throwable t) {
@@ -593,7 +593,7 @@ public class AudioCaptureService extends Service {
                         }
                         mediaPlayer = new MediaPlayer();
                         mediaPlayer.setAudioAttributes(new AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
                             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                             .build());
                         mediaPlayer.setVolume(1.0f, 1.0f);
@@ -602,15 +602,7 @@ public class AudioCaptureService extends Service {
                             mediaPlayer.setDataSource(fis.getFD());
                         }
 
-                        // Auto-catchup: if multiple items are waiting, speak at 1.15x speed to stay in real-time sync
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                            try {
-                                float speed = queuedAhead > 1 ? 1.15f : 1.0f;
-                                android.media.PlaybackParams params = mediaPlayer.getPlaybackParams();
-                                params.setSpeed(speed);
-                                mediaPlayer.setPlaybackParams(params);
-                            } catch (Throwable ignored) {}
-                        }
+                        // Natural studio quality playback at authentic 1.0x human pitch and cadence
 
                         mediaPlayer.setOnCompletionListener(mp -> {
                             if (playQueue.isEmpty()) {
@@ -703,7 +695,7 @@ public class AudioCaptureService extends Service {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 if (nativeAudioFocusRequest == null) {
                     AudioAttributes attrs = new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build();
                     nativeAudioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)

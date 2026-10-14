@@ -1209,12 +1209,12 @@ body {
    ========================================================================== */
 @media (max-width: 768px) {
   body {
-    padding-top: max(var(--safe-top), env(safe-area-inset-top, 0px), 48px) !important;
+    padding-top: 0 !important;
     padding-bottom: max(calc(var(--safe-bottom) + 96px), calc(env(safe-area-inset-bottom, 0px) + 96px), 110px) !important;
   }
 
   .app-layout {
-    padding: 4px 14px !important;
+    padding: 0 14px !important;
   }
 
   .brand-sub {
@@ -1222,8 +1222,19 @@ body {
   }
 
   .app-header {
-    margin-top: 0 !important;
-    padding: 10px 14px !important;
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: rgba(9, 9, 11, 0.96) !important;
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    padding-top: max(var(--safe-top), env(safe-area-inset-top, 0px), 48px) !important;
+    padding-bottom: 12px !important;
+    padding-left: 14px !important;
+    padding-right: 14px !important;
+    margin-left: -14px !important;
+    margin-right: -14px !important;
+    border-bottom: 1px solid var(--border-subtle) !important;
     gap: 8px !important;
     flex-wrap: wrap !important;
   }

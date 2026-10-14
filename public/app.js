@@ -93,7 +93,7 @@
     customModel: localStorage.getItem(STORAGE_KEYS.CUSTOM_MODEL) || '',
 
     // TTS & Voice
-    ttsEngine: localStorage.getItem(STORAGE_KEYS.TTS_ENGINE) || 'mistral',
+    ttsEngine: localStorage.getItem(STORAGE_KEYS.TTS_ENGINE) || 'deepgram',
     mistralVoice: localStorage.getItem('dubber_mistral_voice') || 'fr_marie_happy',
     voiceUri: localStorage.getItem(STORAGE_KEYS.VOICE_URI) || '',
     voiceRate: parseFloat(localStorage.getItem(STORAGE_KEYS.VOICE_RATE)) || 1.10,
@@ -966,8 +966,10 @@
           const captureOpts = {
             srcLang: state.srcLang || 'en',
             targetLang: state.tgtLang || 'fr',
-            voice: state.mistralVoice || 'fr_marie_happy',
-            engine: state.ttsEngine || 'mistral'
+            voice: (state.ttsEngine === 'mistral')
+              ? (state.mistralVoice || 'fr_marie_happy')
+              : 'aura-2-agathe-fr',
+            engine: state.ttsEngine || 'deepgram'
           };
           await audioPlugin.startScreenCapture(captureOpts);
           showToast('Background Dubber active! You can now switch to YouTube.', 'success', 5000);
@@ -2343,9 +2345,9 @@
       elements.srcLangSelect.value = 'en-US';
       elements.tgtLangSelect.value = 'fr-FR';
       elements.modelSelect.value = 'groq-server';
-      elements.ttsEngineSelect.value = 'mistral';
+      elements.ttsEngineSelect.value = 'deepgram';
       if (elements.mistralVoiceSelect) elements.mistralVoiceSelect.value = 'fr_marie_happy';
-      if (elements.mistralVoiceGroup) elements.mistralVoiceGroup.classList.remove('hidden');
+      if (elements.mistralVoiceGroup) elements.mistralVoiceGroup.classList.add('hidden');
       elements.openRouterVoiceGroup.classList.add('hidden');
       elements.speechSynthVoiceGroup.classList.add('hidden');
       elements.voiceRateSlider.value = '1.1';

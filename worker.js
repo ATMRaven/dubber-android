@@ -47,7 +47,7 @@ export default {
         const srcLang = (url.searchParams.get('src') || 'en').split('-')[0].toLowerCase();
         const targetLang = (url.searchParams.get('target') || 'fr').split('-')[0].toLowerCase();
         const voice = url.searchParams.get('voice') || '';
-        const engine = (url.searchParams.get('engine') || 'mistral').toLowerCase();
+        const engine = (url.searchParams.get('engine') || 'deepgram').toLowerCase();
 
         const reqContentType = request.headers.get('Content-Type') || 'audio/wav';
 
@@ -207,6 +207,18 @@ export default {
             });
           }
           return new Response(null, { status: 204 });
+        }
+
+        // Sound Artifact & Hallucination Filter:
+        // When video game sound effects (car engines, gunshots) cause Deepgram to hallucinate non-English tokens
+        // (e.g. "Atashivu" -> "Atashivu", "Bacal" -> "Bacal"), Groq leaves them unchanged. Filter them out!
+        if (srcLang !== targetLang) {
+          const origClean = transcribedText.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const transClean = translatedText.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const wordCount = transcribedText.trim().split(/\s+/).length;
+          if (wordCount <= 2 && origClean === transClean) {
+            return new Response(null, { status: 204 });
+          }
         }
 
         // 3. Synthesize Speech (Mistral Voxtral for FR/EN or Deepgram Aura-2)
