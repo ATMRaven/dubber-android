@@ -58,6 +58,12 @@ export default {
 
         // Voice mapping for Deepgram Aura-2
         const tCode = targetLang.split('-')[0].toLowerCase();
+        if (tCode === 'ar' && !voiceModel) {
+          return new Response(JSON.stringify({ error: 'Deepgram does not support Arabic Aura-2 voices yet. Please use SpeechSynthesis or OpenRouter.' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
         if (!voiceModel) {
           const voiceMap = {
             fr: 'aura-2-agathe-fr',
@@ -192,6 +198,7 @@ export default {
 
         const srcLang = (url.searchParams.get('lang') || 'en').split('-')[0].toLowerCase();
         let transcribedText = '';
+        let deepgramSucceeded = false;
 
         // 1. Deepgram Nova-2 (Ultra-fast <200ms)
         if (env.DEEPGRAM_API_KEY) {
@@ -205,6 +212,7 @@ export default {
               body: audioBuffer
             });
             if (dgRes.ok) {
+              deepgramSucceeded = true;
               const dgData = await dgRes.json();
               transcribedText = dgData.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim() || '';
             }
@@ -213,8 +221,8 @@ export default {
           }
         }
 
-        // 2. Cloudflare Workers AI Whisper fallback
-        if (!transcribedText && env.AI) {
+        // 2. Cloudflare Workers AI Whisper fallback (ONLY if Deepgram was unavailable or request failed)
+        if (!deepgramSucceeded && env.AI) {
           try {
             const audioArray = [...new Uint8Array(audioBuffer)];
             const aiResponse = await env.AI.run('@cf/openai/whisper', {
@@ -226,6 +234,24 @@ export default {
           } catch (aiErr) {
             console.warn('Workers AI Whisper error:', aiErr);
           }
+        }
+
+        // Anti-hallucination filter: discard Whisper/Nova-2 silence artifacts
+        const HALLUCINATIONS = [
+          /^\s*thank you[\s.!,]*$/i,
+          /^\s*thanks for watching[\s.!,]*$/i,
+          /^\s*thank you for watching[\s.!,]*$/i,
+          /^\s*please subscribe[\s.!,]*$/i,
+          /^\s*subscribe to (my|the) channel[\s.!,]*$/i,
+          /^\s*bye[\s.!,]*$/i,
+          /^\s*you[\s.!,]*$/i,
+          /^\s*subtitles by[\s.!,]*$/i,
+          /^\s*\[.*\]\s*$/i,
+          /^\s*\(.*\)\s*$/i
+        ];
+
+        if (HALLUCINATIONS.some(rx => rx.test(transcribedText))) {
+          transcribedText = '';
         }
 
         return new Response(JSON.stringify({ text: transcribedText }), {

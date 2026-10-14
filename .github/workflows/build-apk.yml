@@ -56,8 +56,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cp android/app/build/outputs/apk/debug/app-debug.apk Dubber.apk
-          gh release create v1.1.0 Dubber.apk \
-            --title "Dubber Android v1.1.0" \
-            --notes "Dubber Android APK v1.1.0: Real-time background internal audio playback capture, Android 14/15 FGS media projection crash fix, zero-config French & Arabic translation, and custom Dubber logo branding." \
-            || gh release upload v1.1.0 Dubber.apk --clobber
-          gh release upload v1.0.0 Dubber.apk --clobber || true
+          gh release create v1.2.0 Dubber.apk \
+            --title "Dubber Android v1.2.0" \
+            --notes "Dubber v1.2.0: Fix microphone hijacking & pop-up in screen mode, fix 'Microphone access denied' background crash, eliminate repeating 'Thank you' Whisper hallucinations via VAD & energy gating, implement gapless lookahead Web Audio pipelined streaming, and full adaptive app logo branding." \
+            || gh release upload v1.2.0 Dubber.apk --clobber
+          gh release upload v1.1.0 Dubber.apk --clobber || true

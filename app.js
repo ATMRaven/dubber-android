@@ -357,6 +357,15 @@
   let activeSpeechSamples = [];
   let isSpeechActive = false;
   let silenceFrames = 0;
+  let preSpeechRingBuffer = [];
+  const PRE_RING_MAX = 3;
+
+  let activeNativeSamples = [];
+  let isNativeSpeechActive = false;
+  let nativeSilenceFrames = 0;
+  let nativePreRingBuffer = [];
+  const NATIVE_PRE_RING_MAX = 3;
+
   let isTranscribingChunk = false;
 
   function startDigitalAudioChunker() {
@@ -371,6 +380,7 @@
     activeSpeechSamples = [];
     isSpeechActive = false;
     silenceFrames = 0;
+    preSpeechRingBuffer = [];
 
     processor.onaudioprocess = (e) => {
       if (!state.isDubbing) return;
@@ -383,14 +393,18 @@
       }
       const rms = Math.sqrt(sum / input.length);
 
-      const SPEECH_THRESHOLD = 0.009; // Catches spoken dialogue cleanly
-      const SILENCE_FRAMES_TRIGGER = 10; // ~0.9s pause marks clause boundary
-      const MAX_FRAMES_PER_CHUNK = 34;   // ~3.1s max phrase chunk for rapid response
+      const SPEECH_THRESHOLD = 0.009;   // Spoken dialogue cutoff
+      const SILENCE_FRAMES_TRIGGER = 9; // ~0.8s pause marks natural clause boundary
+      const MAX_FRAMES_PER_CHUNK = 36;  // ~3.4s max phrase chunk for rapid response
 
       if (rms >= SPEECH_THRESHOLD) {
         if (!isSpeechActive) {
           isSpeechActive = true;
           setStatus('listening');
+          // Include pre-speech buffer so onset consonants aren't clipped
+          while (preSpeechRingBuffer.length > 0) {
+            activeSpeechSamples.push(preSpeechRingBuffer.shift());
+          }
         }
         silenceFrames = 0;
         activeSpeechSamples.push(new Float32Array(input));
@@ -399,7 +413,13 @@
         silenceFrames++;
 
         if (silenceFrames >= SILENCE_FRAMES_TRIGGER || activeSpeechSamples.length >= MAX_FRAMES_PER_CHUNK) {
-          dispatchDigitalAudioChunk();
+          dispatchDigitalAudioChunk(false);
+        }
+      } else {
+        // Rolling pre-speech buffer
+        preSpeechRingBuffer.push(new Float32Array(input));
+        if (preSpeechRingBuffer.length > PRE_RING_MAX) {
+          preSpeechRingBuffer.shift();
         }
       }
     };
@@ -411,6 +431,7 @@
   }
 
   function handleNativePcmChunk(base64Data) {
+    if (!state.isDubbing) return;
     try {
       const binaryStr = atob(base64Data);
       const len = binaryStr.length;
@@ -420,44 +441,99 @@
       }
       const int16 = new Int16Array(bytes.buffer);
       const float32 = new Float32Array(int16.length);
+      let sum = 0;
       for (let i = 0; i < int16.length; i++) {
-        float32[i] = int16[i] / 32768.0;
+        const val = int16[i] / 32768.0;
+        float32[i] = val;
+        sum += val * val;
       }
-      activeSpeechSamples.push(float32);
-      if (activeSpeechSamples.length >= 8) {
-        dispatchDigitalAudioChunk();
+      const rms = Math.sqrt(sum / float32.length);
+
+      const NATIVE_SPEECH_THRESHOLD = 0.008;
+      const NATIVE_SILENCE_TRIGGER = 7; // ~0.8s silence
+      const NATIVE_MAX_FRAMES = 28;     // ~3.5s max speech
+
+      if (rms >= NATIVE_SPEECH_THRESHOLD) {
+        if (!isNativeSpeechActive) {
+          isNativeSpeechActive = true;
+          setStatus('listening');
+          while (nativePreRingBuffer.length > 0) {
+            activeNativeSamples.push(nativePreRingBuffer.shift());
+          }
+        }
+        nativeSilenceFrames = 0;
+        activeNativeSamples.push(float32);
+      } else if (isNativeSpeechActive) {
+        activeNativeSamples.push(float32);
+        nativeSilenceFrames++;
+
+        if (nativeSilenceFrames >= NATIVE_SILENCE_TRIGGER || activeNativeSamples.length >= NATIVE_MAX_FRAMES) {
+          dispatchDigitalAudioChunk(true);
+        }
+      } else {
+        nativePreRingBuffer.push(float32);
+        if (nativePreRingBuffer.length > NATIVE_PRE_RING_MAX) {
+          nativePreRingBuffer.shift();
+        }
       }
     } catch (e) {
       console.warn('Native PCM chunk handling error:', e);
     }
   }
 
-  async function dispatchDigitalAudioChunk() {
-    if (activeSpeechSamples.length === 0 || isTranscribingChunk) return;
+  async function dispatchDigitalAudioChunk(isNative = false) {
+    const samplesArray = isNative ? activeNativeSamples : activeSpeechSamples;
+    if (samplesArray.length === 0 || isTranscribingChunk) return;
 
     let totalLength = 0;
-    for (const chunk of activeSpeechSamples) totalLength += chunk.length;
+    for (const chunk of samplesArray) totalLength += chunk.length;
+
+    const sourceRate = isNative ? 16000 : (state.audioCtx ? state.audioCtx.sampleRate : 48000);
 
     // Skip very brief acoustic noise (< 0.3s)
-    if (totalLength < state.audioCtx.sampleRate * 0.3) {
-      activeSpeechSamples = [];
-      isSpeechActive = false;
-      silenceFrames = 0;
+    if (totalLength < sourceRate * 0.3) {
+      if (isNative) {
+        activeNativeSamples = [];
+        isNativeSpeechActive = false;
+        nativeSilenceFrames = 0;
+      } else {
+        activeSpeechSamples = [];
+        isSpeechActive = false;
+        silenceFrames = 0;
+      }
       return;
     }
 
     const merged = new Float32Array(totalLength);
     let offset = 0;
-    for (const chunk of activeSpeechSamples) {
+    for (const chunk of samplesArray) {
       merged.set(chunk, offset);
       offset += chunk.length;
     }
 
-    activeSpeechSamples = [];
-    isSpeechActive = false;
-    silenceFrames = 0;
+    if (isNative) {
+      activeNativeSamples = [];
+      isNativeSpeechActive = false;
+      nativeSilenceFrames = 0;
+    } else {
+      activeSpeechSamples = [];
+      isSpeechActive = false;
+      silenceFrames = 0;
+    }
 
-    const downsampled = downsampleBuffer(merged, state.audioCtx.sampleRate, 16000);
+    // STRICT VAD ENERGY CHECK: Compute overall RMS energy of the merged buffer
+    let energySum = 0;
+    for (let i = 0; i < merged.length; i++) {
+      energySum += merged[i] * merged[i];
+    }
+    const overallRms = Math.sqrt(energySum / merged.length);
+    if (overallRms < 0.0075) {
+      // Discard silence or sub-audible hiss — prevents Whisper hallucination loops completely!
+      return;
+    }
+
+    // Downsample only if source rate is not 16kHz
+    const downsampled = (sourceRate === 16000) ? merged : downsampleBuffer(merged, sourceRate, 16000);
     const wavBlob = encodeWavBlob(downsampled, 16000);
 
     isTranscribingChunk = true;
@@ -495,6 +571,11 @@
     activeSpeechSamples = [];
     isSpeechActive = false;
     silenceFrames = 0;
+    preSpeechRingBuffer = [];
+    activeNativeSamples = [];
+    isNativeSpeechActive = false;
+    nativeSilenceFrames = 0;
+    nativePreRingBuffer = [];
     isTranscribingChunk = false;
   }
 
@@ -732,18 +813,16 @@
         updateTicker(`"${interim.slice(-40)}"`, 'listening');
       }
 
-      // CRITICAL LATENCY & CHUNKING RULE:
-      // Don't wait for paragraph-level silence. Check for clause/sentence boundaries!
+      // Sentence / clause boundary chunking: require complete final utterance or terminal punctuation with substantial content
       if (finalPhrase.trim()) {
         const cleaned = finalPhrase.trim();
         elements.liveOriginalTranscript.textContent = cleaned;
         dispatchUtteranceChunk(cleaned);
-      } else if (interim.length > 25 && /[.,?!;]/.test(interim)) {
-        // Early punctuation boundary detection in interim stream
-        const parts = interim.split(/([.,?!;])/);
+      } else if (interim.length > 55 && /[.?!]/.test(interim)) {
+        const parts = interim.split(/([.?!])/);
         if (parts.length >= 3) {
           const chunk = (parts[0] + parts[1]).trim();
-          if (chunk && chunk !== localBuffer) {
+          if (chunk && chunk !== localBuffer && chunk.split(' ').length >= 6) {
             localBuffer = chunk;
             dispatchUtteranceChunk(chunk);
           }
@@ -753,25 +832,25 @@
 
     recognition.onerror = (event) => {
       console.warn('SpeechRecognition error:', event.error);
-      if (event.error === 'not-allowed') {
+      if (event.error === 'not-allowed' && state.captureSource === 'mic' && !document.hidden) {
         setStatus('error', 'Mic Blocked');
         showToast('Microphone access denied.', 'error');
       }
     };
 
     recognition.onend = () => {
-      // Auto-restart if dubbing session is still active
-      if (state.isDubbing) {
+      // Auto-restart if dubbing session is still active and using microphone
+      if (state.isDubbing && state.captureSource === 'mic') {
         clearTimeout(state.recognitionRestartTimer);
         state.recognitionRestartTimer = setTimeout(() => {
-          if (state.isDubbing) {
+          if (state.isDubbing && state.captureSource === 'mic') {
             try {
               recognition.start();
             } catch (e) {
               // Ignore if already active
             }
           }
-        }, 150);
+        }, 300);
       } else {
         setStatus('idle');
       }
@@ -1022,23 +1101,61 @@
    * 2. Fires translation concurrently
    * 3. Feeds translation directly into the FIFO streaming playback queue
    */
+  const HALLUCINATION_REGEXES = [
+    /^\s*thank you[\s.!,]*$/i,
+    /^\s*thanks for watching[\s.!,]*$/i,
+    /^\s*thank you for watching[\s.!,]*$/i,
+    /^\s*please subscribe[\s.!,]*$/i,
+    /^\s*subscribe to (my|the) channel[\s.!,]*$/i,
+    /^\s*bye[\s.!,]*$/i,
+    /^\s*you[\s.!,]*$/i,
+    /^\s*subtitles by[\s.!,]*$/i,
+    /^\s*\[.*\]\s*$/i,
+    /^\s*\(.*\)\s*$/i
+  ];
+
+  let lastDispatchedPhrase = '';
+  let lastDispatchedTime = 0;
+
+  /**
+   * Handles an incoming speech chunk:
+   * 1. Validates against Whisper/Nova-2 silence hallucinations
+   * 2. Suppresses rapid duplicate repeats
+   * 3. Translates text concurrently
+   * 4. Feeds translation directly into the concurrent gapless audio pipeline
+   */
   async function dispatchUtteranceChunk(originalText) {
-    if (!originalText || originalText.trim().length === 0) return;
+    if (!originalText || !originalText.trim()) return;
+    const text = originalText.trim();
+
+    // 1. Anti-hallucination filter: discard Whisper/Nova-2 silence artifacts
+    if (HALLUCINATION_REGEXES.some(rx => rx.test(text))) {
+      return;
+    }
+
+    // 2. Anti-repetition filter: suppress rapid duplicate hallucinations within 6s
+    const now = Date.now();
+    if (text.toLowerCase() === lastDispatchedPhrase.toLowerCase() && (now - lastDispatchedTime < 6000)) {
+      return;
+    }
+    lastDispatchedPhrase = text;
+    lastDispatchedTime = now;
 
     setStatus('translating');
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
     try {
-      const translatedText = await translateText(originalText, state.srcLang, state.tgtLang);
+      const translatedText = await translateText(text, state.srcLang, state.tgtLang);
+      if (!translatedText || !translatedText.trim()) return;
 
       // Display in live stage
       elements.liveTranslatedTranscript.textContent = translatedText;
       updateTicker(`Dubbing: ${translatedText.slice(0, 50)}...`, 'dubbing');
 
       // Append to session log
-      logTranscript(timestamp, originalText, translatedText);
+      logTranscript(timestamp, text, translatedText);
 
-      // Push into streaming audio queue
+      // Push into streaming pipelined audio queue
       enqueueAudioChunk(translatedText);
     } catch (err) {
       console.error('Error dispatching utterance chunk:', err);
@@ -1046,200 +1163,210 @@
     }
   }
 
+  // =========================================================================
+  // 9. INSTANT STREAMING PLAYBACK & GAPLESS PIPELINED AUDIO ENGINE
+  // =========================================================================
+
+  let audioPipelineQueue = [];
+  let isPipelinePlaying = false;
+  let duckingReleaseTimer = null;
+  let scheduledEndTime = 0;
+  const activeUtterances = new Set();
+
   /**
-   * FIFO Audio Playback Queue
-   * Plays the first available translated chunk instantly without waiting
-   * for the entire stream, chaining subsequent chunks seamlessly.
+   * Pre-fetch audio buffer concurrently while earlier chunks are still speaking
+   */
+  async function prefetchAudioBuffer(text) {
+    const langPrefix = state.tgtLang.split('-')[0].toLowerCase();
+
+    // 1. Deepgram Aura-2 (Ultra-fast, natively supports French, German, Spanish, English, Dutch, Italian, Japanese)
+    // Deepgram Aura-2 does not support Arabic (ar)
+    if (state.ttsEngine === 'deepgram' && langPrefix !== 'ar') {
+      try {
+        const url = 'https://dubber.atmr.workers.dev/api/deepgram/tts';
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: text,
+            target: state.tgtLang
+          })
+        });
+
+        if (res.ok) {
+          const arrayBuffer = await res.arrayBuffer();
+          const ctx = initAudioContext();
+          if (ctx.state === 'suspended') await ctx.resume();
+          return await ctx.decodeAudioData(arrayBuffer);
+        }
+      } catch (err) {
+        console.warn('Deepgram prefetch failed, will fallback:', err.message);
+      }
+    }
+
+    // 2. OpenRouter Audio TTS if configured
+    if (state.ttsEngine === 'openrouter' && state.apiKey) {
+      try {
+        const res = await fetch('https://openrouter.ai/api/v1/audio/speech', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${state.apiKey.trim()}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: state.openRouterVoiceSlug || 'openai/tts-1',
+            input: text,
+            voice: 'alloy'
+          })
+        });
+
+        if (res.ok) {
+          const arrayBuffer = await res.arrayBuffer();
+          const ctx = initAudioContext();
+          if (ctx.state === 'suspended') await ctx.resume();
+          return await ctx.decodeAudioData(arrayBuffer);
+        }
+      } catch (err) {
+        console.warn('OpenRouter prefetch failed:', err.message);
+      }
+    }
+
+    // Return null to signal SpeechSynthesis fallback (Arabic, offline, or default)
+    return null;
+  }
+
+  /**
+   * Enqueue translated text and immediately begin pre-fetching its audio in background
    */
   function enqueueAudioChunk(text) {
     if (!text || !text.trim()) return;
 
-    state.ttsQueue.push(text.trim());
+    const trimmed = text.trim();
+    const item = {
+      text: trimmed,
+      fetchPromise: prefetchAudioBuffer(trimmed)
+    };
 
-    // If queue wasn't already actively playing, start immediately
-    if (!state.isAudioPlaying) {
-      processNextAudioChunk();
+    audioPipelineQueue.push(item);
+
+    if (!isPipelinePlaying) {
+      playAudioPipeline();
     }
   }
 
-  function processNextAudioChunk() {
-    if (state.ttsQueue.length === 0) {
-      state.isAudioPlaying = false;
-      // DUCK RELEASE: When audio queue drains, restore source background volume
-      applyDucking(false);
-      setStatus(state.isDubbing ? 'listening' : 'idle');
+  /**
+   * Continuous gapless audio playback coordinator with Web Audio clock scheduling
+   */
+  async function playAudioPipeline() {
+    if (audioPipelineQueue.length === 0) {
+      isPipelinePlaying = false;
+      // DUCK RELEASE WITH HANG-TIME: don't pump volume up and down between conversational clauses!
+      clearTimeout(duckingReleaseTimer);
+      duckingReleaseTimer = setTimeout(() => {
+        if (!isPipelinePlaying && audioPipelineQueue.length === 0) {
+          applyDucking(false);
+          setStatus(state.isDubbing ? 'listening' : 'idle');
+        }
+      }, 800);
       return;
     }
 
-    state.isAudioPlaying = true;
-    const chunk = state.ttsQueue.shift();
-
-    // DUCK ATTACK: Apply audio ducking instantly as soon as speech starts
+    isPipelinePlaying = true;
+    clearTimeout(duckingReleaseTimer);
     applyDucking(true);
     setStatus('dubbing');
 
-    if (state.ttsEngine === 'deepgram') {
-      playDeepgramAudioChunk(chunk);
-    } else if (state.ttsEngine === 'speechSynthesis') {
-      playSpeechSynthesisChunk(chunk);
-    } else {
-      playOpenRouterAudioChunk(chunk);
-    }
-  }
-
-  /**
-   * Deepgram Aura-2 High-Speed Speech Synthesis
-   */
-  async function playDeepgramAudioChunk(text) {
-    const langPrefix = state.tgtLang.split('-')[0].toLowerCase();
-    // Deepgram Aura-2 natively supports French (fr), German (de), Spanish (es), English (en), Dutch (nl), Italian (it), Japanese (ja)
-    // For Arabic, fallback to SpeechSynthesis
-    if (langPrefix === 'ar') {
-      playSpeechSynthesisChunk(text);
-      return;
-    }
+    const currentItem = audioPipelineQueue.shift();
+    updateTicker(`Dubbing: ${currentItem.text.slice(0, 50)}...`, 'dubbing');
 
     try {
-      const url = 'https://dubber.atmr.workers.dev/api/deepgram/tts';
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: text,
-          target: state.tgtLang
-        })
-      });
+      // Await the pre-fetched audio buffer (which was already loading in background!)
+      const audioBuffer = await currentItem.fetchPromise;
 
-      if (!res.ok) {
-        throw new Error(`Deepgram TTS HTTP ${res.status}`);
+      if (audioBuffer) {
+        const ctx = initAudioContext();
+        if (ctx.state === 'suspended') await ctx.resume();
+
+        const sourceNode = ctx.createBufferSource();
+        sourceNode.buffer = audioBuffer;
+        sourceNode.playbackRate.value = state.voiceRate;
+        sourceNode.connect(ctx.destination);
+
+        const now = ctx.currentTime;
+        // Schedule next chunk seamlessly at the exact microsecond previous chunk finishes
+        const startTime = Math.max(now, scheduledEndTime);
+        const duration = audioBuffer.duration / state.voiceRate;
+        scheduledEndTime = startTime + duration;
+
+        sourceNode.start(startTime);
+
+        // Pre-schedule next chunk 40ms before this chunk finishes (gapless chaining)
+        const delayMs = Math.max(10, ((startTime + duration) - ctx.currentTime - 0.04) * 1000);
+        setTimeout(() => {
+          playAudioPipeline();
+        }, delayMs);
+
+      } else {
+        // SpeechSynthesis fallback (Arabic, offline, etc.)
+        await playSpeechSynthesisPromise(currentItem.text);
+        playAudioPipeline();
       }
-
-      const arrayBuffer = await res.arrayBuffer();
-      const ctx = initAudioContext();
-      if (ctx.state === 'suspended') await ctx.resume();
-      const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-
-      const sourceNode = ctx.createBufferSource();
-      sourceNode.buffer = audioBuffer;
-      sourceNode.playbackRate.value = state.voiceRate;
-      sourceNode.connect(ctx.destination);
-
-      sourceNode.onended = () => {
-        processNextAudioChunk();
-      };
-
-      sourceNode.start(0);
     } catch (err) {
-      console.warn('Deepgram TTS failed, falling back to SpeechSynthesis:', err.message);
-      playSpeechSynthesisChunk(text);
+      console.warn('Pipeline playback error:', err);
+      playAudioPipeline();
     }
   }
 
-  const activeUtterances = new Set();
-
   /**
-   * Native SpeechSynthesis Playback (Instant, Zero Latency, 100% Free)
+   * Native SpeechSynthesis Playback wrapped in a Promise
    */
-  function playSpeechSynthesisChunk(text) {
-    if (!window.speechSynthesis) {
-      console.warn('SpeechSynthesis not supported');
-      processNextAudioChunk();
-      return;
-    }
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = state.tgtLang;
-    utterance.rate = state.voiceRate;
-    utterance.pitch = state.voicePitch;
-
-    // Pick configured voice if available
-    const voices = window.speechSynthesis.getVoices();
-    if (state.voiceUri) {
-      const selected = voices.find(v => v.voiceURI === state.voiceUri);
-      if (selected) utterance.voice = selected;
-    } else {
-      // Match best voice for target language (case-insensitive, normalized)
-      const langPrefix = state.tgtLang.split('-')[0].toLowerCase();
-      const match = voices.find(v => {
-        const vl = (v.lang || '').toLowerCase().replace('_', '-');
-        return vl.startsWith(langPrefix);
-      });
-      if (match) utterance.voice = match;
-    }
-
-    // Retain in memory to prevent Chrome Garbage Collection bug from swallowing callbacks
-    activeUtterances.add(utterance);
-
-    // Watchdog timer: Chrome speech synth occasionally stalls onend
-    let timer = setTimeout(() => {
-      activeUtterances.delete(utterance);
-      processNextAudioChunk();
-    }, Math.max(3500, text.length * 90));
-
-    const finish = () => {
-      clearTimeout(timer);
-      activeUtterances.delete(utterance);
-      processNextAudioChunk();
-    };
-
-    utterance.onend = finish;
-    utterance.onerror = finish;
-
-    // Chrome bug workaround: resume if paused
-    if (window.speechSynthesis.paused) {
-      window.speechSynthesis.resume();
-    }
-
-    window.speechSynthesis.speak(utterance);
-  }
-
-  /**
-   * OpenRouter Audio / TTS Playback with fallback
-   */
-  async function playOpenRouterAudioChunk(text) {
-    // If no API key or audio model fails, seamlessly fallback to SpeechSynthesis
-    if (!state.apiKey) {
-      playSpeechSynthesisChunk(text);
-      return;
-    }
-
-    try {
-      // OpenRouter Audio endpoint or fallback
-      const res = await fetch('https://openrouter.ai/api/v1/audio/speech', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${state.apiKey.trim()}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: state.openRouterVoiceSlug || 'openai/tts-1',
-          input: text,
-          voice: 'alloy'
-        })
-      });
-
-      if (!res.ok) {
-        throw new Error(`OpenRouter TTS HTTP ${res.status}`);
+  function playSpeechSynthesisPromise(text) {
+    return new Promise((resolve) => {
+      if (!window.speechSynthesis) {
+        resolve();
+        return;
       }
 
-      const arrayBuffer = await res.arrayBuffer();
-      const ctx = initAudioContext();
-      const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = state.tgtLang;
+      utterance.rate = state.voiceRate;
+      utterance.pitch = state.voicePitch;
 
-      const sourceNode = ctx.createBufferSource();
-      sourceNode.buffer = audioBuffer;
-      sourceNode.playbackRate.value = state.voiceRate;
+      // Pick configured voice if available
+      const voices = window.speechSynthesis.getVoices();
+      if (state.voiceUri) {
+        const selected = voices.find(v => v.voiceURI === state.voiceUri);
+        if (selected) utterance.voice = selected;
+      } else {
+        const langPrefix = state.tgtLang.split('-')[0].toLowerCase();
+        const match = voices.find(v => {
+          const vl = (v.lang || '').toLowerCase().replace('_', '-');
+          return vl.startsWith(langPrefix);
+        });
+        if (match) utterance.voice = match;
+      }
 
-      sourceNode.connect(ctx.destination);
-      sourceNode.onended = () => {
-        processNextAudioChunk();
+      activeUtterances.add(utterance);
+
+      let finished = false;
+      const done = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(watchdog);
+        activeUtterances.delete(utterance);
+        resolve();
       };
 
-      sourceNode.start(0);
-    } catch (err) {
-      console.warn('OpenRouter Audio TTS failed, falling back to SpeechSynthesis:', err.message);
-      playSpeechSynthesisChunk(text);
-    }
+      const watchdog = setTimeout(done, Math.max(3500, text.length * 90));
+      utterance.onend = done;
+      utterance.onerror = done;
+
+      if (window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
+
+      window.speechSynthesis.speak(utterance);
+    });
   }
 
   // =========================================================================
@@ -1345,10 +1472,15 @@
       // 1. Start Audio Capture (Screen/Tab by default)
       await startAudioCapture();
 
-      // 2. Setup STT
-      const recognition = setupSpeechRecognition();
-      if (recognition) {
-        recognition.start();
+      // 2. Setup STT ONLY if physical microphone was explicitly chosen
+      // Screen/Tab and Android Internal Audio do NOT use SpeechRecognition!
+      if (state.captureSource === 'mic') {
+        const recognition = setupSpeechRecognition();
+        if (recognition) {
+          recognition.start();
+        }
+      } else {
+        console.info('Dubber: Digital internal audio stream active. Hardware mic is isolated.');
       }
 
       state.isDubbing = true;
@@ -1376,19 +1508,28 @@
       try { state.recognition.stop(); } catch (e) {}
     }
     clearTimeout(state.recognitionRestartTimer);
+    clearTimeout(duckingReleaseTimer);
 
     // Cancel queued TTS
     if (window.speechSynthesis) {
       window.speechSynthesis.cancel();
     }
-    state.ttsQueue = [];
-    state.isAudioPlaying = false;
+    audioPipelineQueue = [];
+    isPipelinePlaying = false;
+    scheduledEndTime = 0;
 
     // Restore source ducking gain
     applyDucking(false);
 
     // Stop streams
     stopAudioGraph();
+
+    // If native Android screen capture was running, stop it
+    if (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform() && window.Capacitor.Plugins && window.Capacitor.Plugins.AudioCapture) {
+      try {
+        window.Capacitor.Plugins.AudioCapture.stopScreenCapture();
+      } catch (e) {}
+    }
 
     // Reset Pill
     elements.pillToggleBtn.classList.remove('is-active');
