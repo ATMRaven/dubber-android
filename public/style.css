@@ -1209,12 +1209,12 @@ body {
    ========================================================================== */
 @media (max-width: 768px) {
   body {
-    padding-top: max(var(--safe-top), 24px) !important;
-    padding-bottom: max(calc(var(--safe-bottom) + 96px), 110px) !important;
+    padding-top: max(var(--safe-top), env(safe-area-inset-top, 0px), 48px) !important;
+    padding-bottom: max(calc(var(--safe-bottom) + 96px), calc(env(safe-area-inset-bottom, 0px) + 96px), 110px) !important;
   }
 
   .app-layout {
-    padding: 8px 14px !important;
+    padding: 4px 14px !important;
   }
 
   .brand-sub {
@@ -1222,7 +1222,7 @@ body {
   }
 
   .app-header {
-    margin-top: max(var(--safe-top), 6px) !important;
+    margin-top: 0 !important;
     padding: 10px 14px !important;
     gap: 8px !important;
     flex-wrap: wrap !important;
@@ -1243,10 +1243,10 @@ body {
     display: none !important;
   }
 
-  /* Safe Area Aware Floating Controller Pill */
+  /* Safe Area Aware Floating Controller Pill (Clamped above Android navigation bar) */
   .floating-pill {
     top: auto !important;
-    bottom: max(calc(var(--safe-bottom) + 14px), 24px) !important;
+    bottom: max(calc(var(--safe-bottom) + 16px), calc(env(safe-area-inset-bottom, 0px) + 16px), 28px) !important;
     right: 12px !important;
     left: 12px !important;
     width: calc(100% - 24px) !important;

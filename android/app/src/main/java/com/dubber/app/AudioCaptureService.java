@@ -206,67 +206,152 @@ public class AudioCaptureService extends Service {
 
             AudioPlaybackCaptureConfiguration config = configBuilder.build();
 
-            final int sampleRate = 16000;
-            final int channelConfig = AudioFormat.CHANNEL_IN_MONO;
-            final int audioFormat = AudioFormat.ENCODING_PCM_16BIT;
-            int minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat);
-            int bufferSize = Math.max(minBufferSize, 4096);
+            // Format negotiation: HALs for AudioPlaybackCapture frequently reject 16kHz mono.
+            // Probe supported standard rates and channel configs (48k/44.1k Stereo -> Mono)
+            int[][] candidates = new int[][] {
+                { 48000, AudioFormat.CHANNEL_IN_STEREO },
+                { 44100, AudioFormat.CHANNEL_IN_STEREO },
+                { 16000, AudioFormat.CHANNEL_IN_MONO },
+                { 48000, AudioFormat.CHANNEL_IN_MONO },
+                { 44100, AudioFormat.CHANNEL_IN_MONO },
+                { 16000, AudioFormat.CHANNEL_IN_STEREO }
+            };
 
-            audioRecord = new AudioRecord.Builder()
-                .setAudioPlaybackCaptureConfig(config)
-                .setAudioFormat(new AudioFormat.Builder()
-                    .setEncoding(audioFormat)
-                    .setSampleRate(sampleRate)
-                    .setChannelMask(channelConfig)
-                    .build())
-                .setBufferSizeInBytes(bufferSize)
-                .build();
+            AudioRecord record = null;
+            int chosenSampleRate = 16000;
+            int chosenChannelConfig = AudioFormat.CHANNEL_IN_MONO;
+            int chosenBufferSize = 4096;
 
-            if (audioRecord.getState() != AudioRecord.STATE_INITIALIZED) {
-                Log.e(TAG, "AudioRecord could not initialize. State=" + audioRecord.getState());
+            for (int[] cand : candidates) {
+                int rate = cand[0];
+                int ch = cand[1];
+                try {
+                    int minBuf = AudioRecord.getMinBufferSize(rate, ch, AudioFormat.ENCODING_PCM_16BIT);
+                    if (minBuf <= 0) continue;
+                    int bufSize = Math.max(minBuf * 2, 4096);
+
+                    AudioRecord testRecord = new AudioRecord.Builder()
+                        .setAudioPlaybackCaptureConfig(config)
+                        .setAudioFormat(new AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(rate)
+                            .setChannelMask(ch)
+                            .build())
+                        .setBufferSizeInBytes(bufSize)
+                        .build();
+
+                    if (testRecord.getState() == AudioRecord.STATE_INITIALIZED) {
+                        record = testRecord;
+                        chosenSampleRate = rate;
+                        chosenChannelConfig = ch;
+                        chosenBufferSize = bufSize;
+                        Log.i(TAG, "AudioPlaybackCapture initialized at " + rate + "Hz, ch=" + ch + ", buf=" + bufSize);
+                        break;
+                    } else {
+                        testRecord.release();
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "Failed format attempt for " + rate + "Hz: " + t.getMessage());
+                }
+            }
+
+            if (record == null) {
+                Log.e(TAG, "AudioPlaybackCapture could not initialize any audio format!");
                 return;
             }
 
+            audioRecord = record;
             dubExecutor = Executors.newSingleThreadExecutor();
             audioRecord.startRecording();
             isRecording = true;
 
+            final int captureRate = chosenSampleRate;
+            final int captureChannels = (chosenChannelConfig == AudioFormat.CHANNEL_IN_STEREO) ? 2 : 1;
+            final int readBufSize = chosenBufferSize;
+
             recordingThread = new Thread(() -> {
-                byte[] buffer = new byte[bufferSize];
+                byte[] rawBuffer = new byte[readBufSize];
                 ByteArrayOutputStream speechBuffer = new ByteArrayOutputStream();
                 boolean isSpeechActive = false;
                 int silenceFrames = 0;
 
-                // Native VAD thresholds: 16kHz 16-bit mono
-                // buffer is ~4096 bytes = 2048 samples = 128ms
-                final int SPEECH_THRESHOLD_RMS = 160;   // approx 0.005 RMS
-                final int SILENCE_FRAMES_TRIGGER = 3;    // ~380ms pause
-                final int MAX_SPEECH_BYTES = 48000;      // 1.5s max phrase chunk (rapid phrases)
-                final int MIN_SPEECH_BYTES = 9600;       // 0.3s min phrase chunk
+                // Native VAD thresholds: calibrated for 16kHz 16-bit Mono PCM
+                final int SPEECH_THRESHOLD_RMS = 160;
+                final int SILENCE_FRAMES_TRIGGER = 3;    // ~350ms pause
+                final int MAX_SPEECH_BYTES = 80000;      // ~2.5s max phrase chunk (natural sentences)
+                final int MIN_SPEECH_BYTES = 9600;       // ~0.3s min phrase chunk
 
                 while (isRecording && audioRecord != null) {
                     try {
-                        int read = audioRecord.read(buffer, 0, buffer.length);
+                        int read = audioRecord.read(rawBuffer, 0, rawBuffer.length);
                         if (read <= 0) continue;
 
-                        // Echo suppression: If Dubber is actively playing speech out of phone speakers, drop captured audio
-                        if (isPlayingDubbedAudio) {
-                            continue;
+                        // 1. Downmix to mono short samples
+                        int inputFrames = read / (2 * captureChannels);
+                        if (inputFrames <= 0) continue;
+
+                        short[] monoInput = new short[inputFrames];
+                        if (captureChannels == 2) {
+                            for (int i = 0; i < inputFrames; i++) {
+                                int byteIdx = i * 4;
+                                short left = (short) ((rawBuffer[byteIdx] & 0xFF) | (rawBuffer[byteIdx + 1] << 8));
+                                short right = (short) ((rawBuffer[byteIdx + 2] & 0xFF) | (rawBuffer[byteIdx + 3] << 8));
+                                monoInput[i] = (short) ((left + right) / 2);
+                            }
+                        } else {
+                            for (int i = 0; i < inputFrames; i++) {
+                                int byteIdx = i * 2;
+                                monoInput[i] = (short) ((rawBuffer[byteIdx] & 0xFF) | (rawBuffer[byteIdx + 1] << 8));
+                            }
                         }
 
-                        if (sListener != null) {
-                            byte[] chunk = new byte[read];
-                            System.arraycopy(buffer, 0, chunk, 0, read);
-                            sListener.onAudioChunk(chunk);
+                        // 2. High-quality decimation/resampling to 16,000 Hz Mono
+                        short[] samples16k;
+                        if (captureRate == 16000) {
+                            samples16k = monoInput;
+                        } else if (captureRate == 48000) {
+                            int outFrames = inputFrames / 3;
+                            samples16k = new short[outFrames];
+                            for (int i = 0; i < outFrames; i++) {
+                                int idx = i * 3;
+                                samples16k[i] = (short) (((long) monoInput[idx] + monoInput[idx + 1] + monoInput[idx + 2]) / 3);
+                            }
+                        } else {
+                            // Linear interpolation for 44.1kHz or other rates
+                            double ratio = (double) captureRate / 16000.0;
+                            int outFrames = (int) (inputFrames / ratio);
+                            samples16k = new short[outFrames];
+                            for (int i = 0; i < outFrames; i++) {
+                                double srcPos = i * ratio;
+                                int srcIndex = (int) srcPos;
+                                double frac = srcPos - srcIndex;
+                                if (srcIndex + 1 < inputFrames) {
+                                    samples16k[i] = (short) (monoInput[srcIndex] * (1.0 - frac) + monoInput[srcIndex + 1] * frac);
+                                } else if (srcIndex < inputFrames) {
+                                    samples16k[i] = monoInput[srcIndex];
+                                }
+                            }
                         }
 
-                        // Compute RMS energy across the 128ms PCM window
+                        if (samples16k.length == 0) continue;
+
+                        // 3. Convert 16k samples to bytes
+                        byte[] pcm16k = new byte[samples16k.length * 2];
                         long sum = 0;
-                        for (int i = 0; i < read; i += 2) {
-                            short sample = (short) ((buffer[i] & 0xFF) | (buffer[i + 1] << 8));
-                            sum += sample * sample;
+                        for (int i = 0; i < samples16k.length; i++) {
+                            short s = samples16k[i];
+                            pcm16k[i * 2] = (byte) (s & 0xFF);
+                            pcm16k[i * 2 + 1] = (byte) ((s >> 8) & 0xFF);
+                            sum += (long) s * s;
                         }
-                        double rms = Math.sqrt((double) sum / (read / 2));
+
+                        // Notify listener (e.g. for VU meter in JS)
+                        if (sListener != null) {
+                            sListener.onAudioChunk(pcm16k);
+                        }
+
+                        // 4. Compute RMS energy across the 16kHz window
+                        double rms = Math.sqrt((double) sum / samples16k.length);
 
                         if (rms >= SPEECH_THRESHOLD_RMS) {
                             if (!isSpeechActive) {
@@ -274,9 +359,9 @@ public class AudioCaptureService extends Service {
                                 speechBuffer.reset();
                             }
                             silenceFrames = 0;
-                            speechBuffer.write(buffer, 0, read);
+                            speechBuffer.write(pcm16k, 0, pcm16k.length);
 
-                            // FORCED CUT: If continuous audio reaches 1.5 seconds, dispatch immediately!
+                            // Forced cut: dispatch when phrase buffer hits max length
                             if (speechBuffer.size() >= MAX_SPEECH_BYTES) {
                                 byte[] chunk = speechBuffer.toByteArray();
                                 speechBuffer.reset();
@@ -284,7 +369,7 @@ public class AudioCaptureService extends Service {
                                 dispatchToEdgeDubber(chunk);
                             }
                         } else if (isSpeechActive) {
-                            speechBuffer.write(buffer, 0, read);
+                            speechBuffer.write(pcm16k, 0, pcm16k.length);
                             silenceFrames++;
 
                             if (silenceFrames >= SILENCE_FRAMES_TRIGGER || speechBuffer.size() >= MAX_SPEECH_BYTES) {
@@ -304,7 +389,7 @@ public class AudioCaptureService extends Service {
                 }
             }, "Dubber-AudioCaptureThread");
             recordingThread.start();
-            Log.i(TAG, "Internal AudioCapture running at 16kHz Mono with Native Background Dubbing");
+            Log.i(TAG, "Internal AudioCapture running: " + captureRate + "Hz -> 16kHz Mono Pipeline");
         } catch (Throwable e) {
             Log.e(TAG, "Error initializing AudioPlaybackCapture: " + e.getMessage(), e);
         }
@@ -327,7 +412,7 @@ public class AudioCaptureService extends Service {
                 conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("POST");
                 conn.setRequestProperty("Content-Type", "audio/wav");
-                conn.setRequestProperty("User-Agent", "Dubber/1.3.4 (Android Mobile)");
+                conn.setRequestProperty("User-Agent", "Dubber/1.3.5 (Android Mobile)");
                 conn.setDoOutput(true);
                 conn.setConnectTimeout(4000);
                 conn.setReadTimeout(12000);
@@ -385,8 +470,10 @@ public class AudioCaptureService extends Service {
                         mediaPlayer = null;
                     }
                     mediaPlayer = new MediaPlayer();
+                    // USAGE_ASSISTANCE_NAVIGATION_GUIDANCE forces Android's system audio mixer
+                    // to duck background apps (like YouTube or Spotify) down to 20% volume!
                     mediaPlayer.setAudioAttributes(new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build());
                     mediaPlayer.setDataSource(audioFile.getAbsolutePath());
@@ -428,7 +515,7 @@ public class AudioCaptureService extends Service {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 if (nativeAudioFocusRequest == null) {
                     AudioAttributes attrs = new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build();
                     nativeAudioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)

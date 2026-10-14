@@ -56,9 +56,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cp android/app/build/outputs/apk/debug/app-debug.apk Dubber.apk
-          gh release create v1.3.4 Dubber.apk \
-            --title "Dubber Android v1.3.4" \
-            --notes "Dubber v1.3.4: Native Android Background Execution Pipeline. Internal digital audio capture, VAD phrase chunking, Cloudflare edge roundtrip (/api/dub), system audio focus ducking, and speech playback now run directly inside Android Native Foreground Service, guaranteeing zero background suspension while playing YouTube full-screen." \
-            || gh release upload v1.3.4 Dubber.apk --clobber
+          gh release create v1.3.5 Dubber.apk \
+            --title "Dubber Android v1.3.5" \
+            --notes "Dubber v1.3.5: Multi-format hardware audio negotiation (48kHz/44.1kHz stereo to 16kHz mono resampling), platform-enforced system ducking (USAGE_ASSISTANCE_NAVIGATION_GUIDANCE), forced internal display audio capture on APK, continuous non-blocking background speech ingestion, and notch/navigation bar safe-area insets." \
+            || gh release upload v1.3.5 Dubber.apk --clobber
+          gh release upload v1.3.4 Dubber.apk --clobber || true
           gh release upload v1.3.3 Dubber.apk --clobber || true
           gh release upload v1.3.2 Dubber.apk --clobber || true

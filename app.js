@@ -36,8 +36,28 @@
     PILL_POS: 'dubber_pill_pos'
   };
 
+  const isNativeAndroid = () => {
+    return !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
+  };
+
+  const getAudioCapturePlugin = () => {
+    if (!window.Capacitor) return null;
+    if (window.Capacitor.Plugins && window.Capacitor.Plugins.AudioCapture) {
+      return window.Capacitor.Plugins.AudioCapture;
+    }
+    if (typeof window.Capacitor.registerPlugin === 'function') {
+      try {
+        const plugin = window.Capacitor.registerPlugin('AudioCapture');
+        if (plugin) return plugin;
+      } catch (e) {
+        console.warn('Failed to register AudioCapture plugin:', e);
+      }
+    }
+    return window.Capacitor.Plugins ? window.Capacitor.Plugins.AudioCapture : null;
+  };
+
   const hasDisplayMediaSupport = () => {
-    if (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform()) {
+    if (isNativeAndroid()) {
       return true; // Native Android APK with AudioPlaybackCapture supports internal screen audio!
     }
     return !!(navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function');
@@ -46,9 +66,11 @@
   const state = {
     isDubbing: false,
     status: 'idle', // 'idle' | 'listening' | 'translating' | 'dubbing' | 'error'
-    captureSource: (localStorage.getItem(STORAGE_KEYS.CAPTURE_SOURCE) === 'display' && !hasDisplayMediaSupport())
-      ? 'mic'
-      : (localStorage.getItem(STORAGE_KEYS.CAPTURE_SOURCE) || (hasDisplayMediaSupport() ? 'display' : 'mic')),
+    captureSource: isNativeAndroid()
+      ? 'display'
+      : (localStorage.getItem(STORAGE_KEYS.CAPTURE_SOURCE) === 'display' && !hasDisplayMediaSupport())
+        ? 'mic'
+        : (localStorage.getItem(STORAGE_KEYS.CAPTURE_SOURCE) || (hasDisplayMediaSupport() ? 'display' : 'mic')),
     micPassthrough: localStorage.getItem(STORAGE_KEYS.MIC_PASSTHROUGH) === 'true',
     routeScreenToOutput: localStorage.getItem(STORAGE_KEYS.ROUTE_SCREEN_TO_OUTPUT) === 'true',
     lookaheadSyncEnabled: localStorage.getItem(STORAGE_KEYS.LOOKAHEAD_SYNC_ENABLED) === 'true',
@@ -266,12 +288,13 @@
     state.isDucked = duck;
 
     // 1. Native Android System Audio Focus Ducking (lowers YouTube, Spotify, etc.)
-    if (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform() && window.Capacitor.Plugins && window.Capacitor.Plugins.AudioCapture) {
+    const audioPlugin = getAudioCapturePlugin();
+    if (isNativeAndroid() && audioPlugin) {
       try {
         if (duck) {
-          window.Capacitor.Plugins.AudioCapture.requestDuck().catch(() => {});
+          audioPlugin.requestDuck().catch(() => {});
         } else {
-          window.Capacitor.Plugins.AudioCapture.abandonDuck().catch(() => {});
+          audioPlugin.abandonDuck().catch(() => {});
         }
       } catch (e) {}
     }
@@ -937,19 +960,20 @@
       let stream;
       if (isScreen) {
         // If running inside Capacitor Native Android APK
-        if (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform() && window.Capacitor.Plugins && window.Capacitor.Plugins.AudioCapture) {
+        const audioPlugin = getAudioCapturePlugin();
+        if (isNativeAndroid() && audioPlugin) {
           showToast('Starting Android internal background dubbing engine...', 'info', 3000);
           const captureOpts = {
             srcLang: state.srcLang || 'en',
-            targetLang: state.targetLang || 'fr',
+            targetLang: state.tgtLang || 'fr',
             voice: state.mistralVoice || 'fr_marie_happy',
             engine: state.ttsEngine || 'mistral'
           };
-          await window.Capacitor.Plugins.AudioCapture.startScreenCapture(captureOpts);
+          await audioPlugin.startScreenCapture(captureOpts);
           showToast('Background Dubber active! You can now switch to YouTube.', 'success', 5000);
 
           // Native Android Service sends live transcription & translation results
-          window.Capacitor.Plugins.AudioCapture.addListener('dubResult', (event) => {
+          audioPlugin.addListener('dubResult', (event) => {
             if (event && event.original && event.translated && state.isDubbing) {
               elements.liveOriginalTranscript.textContent = event.original;
               elements.liveDubbedTranscript.textContent = event.translated;
@@ -1826,9 +1850,10 @@
     stopAudioGraph();
 
     // If native Android screen capture was running, stop it
-    if (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform() && window.Capacitor.Plugins && window.Capacitor.Plugins.AudioCapture) {
+    const audioPlugin = getAudioCapturePlugin();
+    if (isNativeAndroid() && audioPlugin) {
       try {
-        window.Capacitor.Plugins.AudioCapture.stopScreenCapture();
+        audioPlugin.stopScreenCapture();
       } catch (e) {}
     }
 
@@ -2377,9 +2402,30 @@
   }
 
   function initUIFromState() {
-    // Check display media capability on this device (Desktop vs Mobile)
+    // Check display media capability on this device (Desktop vs Mobile vs Native Android)
     const hasDisplay = hasDisplayMediaSupport();
-    if (!hasDisplay) {
+    if (isNativeAndroid()) {
+      state.captureSource = 'display';
+      localStorage.setItem(STORAGE_KEYS.CAPTURE_SOURCE, 'display');
+      if (elements.sourceDisplayRadio) {
+        elements.sourceDisplayRadio.checked = true;
+        elements.sourceDisplayRadio.disabled = false;
+        const parent = elements.sourceDisplayRadio.closest('.radio-card');
+        if (parent) {
+          parent.style.opacity = '1.0';
+          const title = parent.querySelector('.radio-card-title');
+          if (title) title.textContent = 'Internal Audio Capture (Android Service)';
+          const desc = parent.querySelector('.radio-card-desc');
+          if (desc) desc.textContent = 'Direct hardware playback capture. Dubs YouTube and apps in the background with zero echo.';
+        }
+      }
+      if (elements.sourceMicRadio) {
+        elements.sourceMicRadio.checked = false;
+      }
+      if (elements.statSource) {
+        elements.statSource.innerHTML = 'Source: <strong>Internal Audio (Android Service)</strong>';
+      }
+    } else if (!hasDisplay) {
       state.captureSource = 'mic';
       if (elements.sourceDisplayRadio) {
         elements.sourceDisplayRadio.disabled = true;
