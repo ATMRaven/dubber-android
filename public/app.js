@@ -30,6 +30,9 @@
     DUCKING_DEPTH: 'dubber_ducking_depth',
     CAPTURE_SOURCE: 'dubber_capture_source',
     MIC_PASSTHROUGH: 'dubber_mic_passthrough',
+    ROUTE_SCREEN_TO_OUTPUT: 'dubber_route_screen_to_output',
+    LOOKAHEAD_SYNC_ENABLED: 'dubber_lookahead_sync_enabled',
+    LOOKAHEAD_DELAY: 'dubber_lookahead_delay',
     PILL_POS: 'dubber_pill_pos'
   };
 
@@ -47,6 +50,10 @@
       ? 'mic'
       : (localStorage.getItem(STORAGE_KEYS.CAPTURE_SOURCE) || (hasDisplayMediaSupport() ? 'display' : 'mic')),
     micPassthrough: localStorage.getItem(STORAGE_KEYS.MIC_PASSTHROUGH) === 'true',
+    routeScreenToOutput: localStorage.getItem(STORAGE_KEYS.ROUTE_SCREEN_TO_OUTPUT) === 'true',
+    lookaheadSyncEnabled: localStorage.getItem(STORAGE_KEYS.LOOKAHEAD_SYNC_ENABLED) === 'true',
+    lookaheadDelay: parseFloat(localStorage.getItem(STORAGE_KEYS.LOOKAHEAD_DELAY)) || 2.5,
+    screenDelayNode: null,
     
     // Languages
     srcLang: localStorage.getItem(STORAGE_KEYS.SRC_LANG) || 'en-US',
@@ -133,6 +140,14 @@
     youtubePlayer: document.getElementById('youtubePlayer'),
     youtubeUrlInput: document.getElementById('youtubeUrlInput'),
     loadYoutubeBtn: document.getElementById('loadYoutubeBtn'),
+    lookaheadSyncToggle: document.getElementById('lookaheadSyncToggle'),
+    syncSliderGroup: document.getElementById('syncSliderGroup'),
+    lookaheadDelaySlider: document.getElementById('lookaheadDelaySlider'),
+    lookaheadDelayVal: document.getElementById('lookaheadDelayVal'),
+    lookaheadVideoCanvas: document.getElementById('lookaheadVideoCanvas'),
+    capturedVideoElement: document.getElementById('capturedVideoElement'),
+    lookaheadBadge: document.getElementById('lookaheadBadge'),
+    lookaheadBadgeText: document.getElementById('lookaheadBadgeText'),
 
     // Transcript Log
     copyTranscriptBtn: document.getElementById('copyTranscriptBtn'),
@@ -146,6 +161,7 @@
     closeDrawerBtn: document.getElementById('closeDrawerBtn'),
     sourceMicRadio: document.getElementById('sourceMicRadio'),
     sourceDisplayRadio: document.getElementById('sourceDisplayRadio'),
+    routeScreenToOutputToggle: document.getElementById('routeScreenToOutputToggle'),
     micLoopbackToggle: document.getElementById('micLoopbackToggle'),
     srcLangSelect: document.getElementById('srcLangSelect'),
     tgtLangSelect: document.getElementById('tgtLangSelect'),
@@ -249,9 +265,22 @@
     state.duckingGainNode.gain.setValueAtTime(state.duckingGainNode.gain.value, now);
     state.duckingGainNode.gain.linearRampToValueAtTime(targetGain, now + rampTime);
 
+    // Also communicate volume ducking directly to the embedded YouTube player iframe if active
+    if (elements.youtubePlayer && elements.youtubePlayer.contentWindow) {
+      try {
+        const vol = duck ? state.duckingDepth : 100;
+        elements.youtubePlayer.contentWindow.postMessage(JSON.stringify({
+          event: 'command',
+          func: 'setVolume',
+          args: [vol]
+        }), '*');
+      } catch (e) {}
+    }
+
     // Update Pill & Stats
     if (duck) {
-      elements.statDuckingVal.textContent = `Ducking Active (${state.duckingDepth}%)`;
+      const depthDesc = state.duckingDepth === 0 ? 'Muted (100% duck)' : `${state.duckingDepth}% (-${100 - state.duckingDepth}%)`;
+      elements.statDuckingVal.textContent = `Ducking Active (${depthDesc})`;
       elements.statDuckingVal.style.color = '#38bdf8';
     } else {
       elements.statDuckingVal.textContent = `Normal (100%)`;
@@ -269,6 +298,10 @@
     if (state.sourceNode) {
       try { state.sourceNode.disconnect(); } catch (e) {}
     }
+    if (state.screenDelayNode) {
+      try { state.screenDelayNode.disconnect(); } catch (e) {}
+      state.screenDelayNode = null;
+    }
 
     state.sourceNode = ctx.createMediaStreamSource(stream);
     state.duckingGainNode = ctx.createGain();
@@ -281,14 +314,31 @@
     state.sourceNode.connect(state.duckingGainNode);
     state.duckingGainNode.connect(state.analyserNode);
 
-    // CRITICAL AUDIO ROUTING RULE:
-    // If Screen/Tab internal audio is captured, ROUTE to destination so the user
-    // can listen to the YouTube video through headphones/speakers while ducked!
-    // If Microphone is captured, DO NOT route to destination by default to prevent howling acoustic feedback loop!
+    // CRITICAL ANTI-ECHO AUDIO ROUTING LOGIC:
+    // When capturing Screen/Tab:
+    // 1. If Chrome suppressed local tab playback (suppressLocalAudioPlayback: true),
+    //    Dubber is the sole audio channel -> route to destination so user hears the video!
+    // 2. If local playback was NOT suppressed (browser is already outputting sound directly to headphones),
+    //    routing to destination creates a 40ms flanging echo! We do NOT route duplicate audio
+    //    unless the user explicitly checked state.routeScreenToOutput.
+    // 3. When Lookahead Lip-Sync is enabled, background screen audio routes through a DelayNode
+    //    so the original audio remains in exact lockstep with the delayed video on canvas!
+    const audioTrack = stream.getAudioTracks()[0];
+    const isLocalSuppressed = audioTrack && typeof audioTrack.getSettings === 'function' && audioTrack.getSettings().suppressLocalAudioPlayback === true;
+
     if (isScreenAudio) {
-      state.analyserNode.connect(ctx.destination);
+      if (isLocalSuppressed || state.routeScreenToOutput) {
+        if (state.lookaheadSyncEnabled) {
+          state.screenDelayNode = ctx.createDelay(10.0);
+          state.screenDelayNode.delayTime.setValueAtTime(state.lookaheadDelay, ctx.currentTime);
+          state.duckingGainNode.connect(state.screenDelayNode);
+          state.screenDelayNode.connect(ctx.destination);
+        } else {
+          state.duckingGainNode.connect(ctx.destination);
+        }
+      }
     } else if (state.micPassthrough) {
-      state.analyserNode.connect(ctx.destination);
+      state.duckingGainNode.connect(ctx.destination);
     }
 
     // Direct Digital Audio Track Chunker (Captures screen/tab audio directly for STT without mic)
@@ -422,12 +472,23 @@
           preSpeechRingBuffer.shift();
         }
       }
+
+      // CRITICAL: Explicitly clear output buffer to guarantee ZERO un-ducked audio leakage to speakers!
+      if (e.outputBuffer && e.outputBuffer.numberOfChannels > 0) {
+        for (let c = 0; c < e.outputBuffer.numberOfChannels; c++) {
+          e.outputBuffer.getChannelData(c).fill(0);
+        }
+      }
     };
 
     state.sourceNode.connect(processor);
-    // Silent output to keep processor active
-    processor.connect(ctx.destination);
+    // Connect through a hard 0-gain mute node to keep ScriptProcessor running without sound leakage
+    const muteNode = ctx.createGain();
+    muteNode.gain.setValueAtTime(0, ctx.currentTime);
+    processor.connect(muteNode);
+    muteNode.connect(ctx.destination);
     state.digitalProcessorNode = processor;
+    state.digitalProcessorMuteNode = muteNode;
   }
 
   function handleNativePcmChunk(base64Data) {
@@ -549,9 +610,10 @@
         const data = await res.json();
         if (data.text && data.text.trim()) {
           const phrase = data.text.trim();
+          const captureCtxTime = state.audioCtx ? state.audioCtx.currentTime : 0;
           elements.liveOriginalTranscript.textContent = phrase;
           updateTicker(`"${phrase.slice(-40)}"`, 'listening');
-          dispatchUtteranceChunk(phrase);
+          dispatchUtteranceChunk(phrase, captureCtxTime);
         }
       }
     } catch (err) {
@@ -568,6 +630,12 @@
       } catch (e) {}
       state.digitalProcessorNode = null;
     }
+    if (state.digitalProcessorMuteNode) {
+      try {
+        state.digitalProcessorMuteNode.disconnect();
+      } catch (e) {}
+      state.digitalProcessorMuteNode = null;
+    }
     activeSpeechSamples = [];
     isSpeechActive = false;
     silenceFrames = 0;
@@ -581,6 +649,7 @@
 
   function stopAudioGraph() {
     stopDigitalAudioChunker();
+    stopLookaheadVideoLoop();
 
     if (state.animFrameId) {
       cancelAnimationFrame(state.animFrameId);
@@ -589,6 +658,10 @@
     if (state.mediaStream) {
       state.mediaStream.getTracks().forEach(track => track.stop());
       state.mediaStream = null;
+    }
+    if (state.screenDelayNode) {
+      try { state.screenDelayNode.disconnect(); } catch (e) {}
+      state.screenDelayNode = null;
     }
     if (state.duckingGainNode) {
       try { state.duckingGainNode.disconnect(); } catch (e) {}
@@ -684,6 +757,130 @@
   }
 
   // =========================================================================
+  // 5B. LOOKAHEAD LIP-SYNC VIDEO DELAY ENGINE
+  // =========================================================================
+
+  let lookaheadFrameQueue = [];
+  let isLookaheadRunning = false;
+  let lookaheadRafId = null;
+
+  function startLookaheadVideoLoop() {
+    if (!state.lookaheadSyncEnabled || !state.mediaStream) return;
+    const videoTracks = state.mediaStream.getVideoTracks();
+    if (!videoTracks || videoTracks.length === 0) return;
+
+    const videoEl = elements.capturedVideoElement;
+    const canvas = elements.lookaheadVideoCanvas;
+    const badge = elements.lookaheadBadge;
+    if (!videoEl || !canvas) return;
+
+    try {
+      videoEl.srcObject = new MediaStream([videoTracks[0]]);
+      videoEl.play().catch(e => console.warn('Lookahead video element play error:', e));
+    } catch (err) {
+      console.warn('Lookahead video source attach error:', err);
+      return;
+    }
+
+    canvas.style.display = 'block';
+    if (badge) {
+      badge.style.display = 'flex';
+      if (elements.lookaheadBadgeText) {
+        elements.lookaheadBadgeText.textContent = `Lookahead Lip-Sync: ${state.lookaheadDelay.toFixed(1)}s Delay`;
+      }
+    }
+
+    isLookaheadRunning = true;
+    lookaheadFrameQueue = [];
+    const ctx = canvas.getContext('2d');
+
+    let lastCaptureTime = 0;
+    const targetFps = 30;
+    const frameInterval = 1000 / targetFps;
+
+    async function frameLoop(now) {
+      if (!isLookaheadRunning) return;
+
+      // 1. Capture live frame at 30 FPS
+      if (now - lastCaptureTime >= frameInterval && videoEl.readyState >= 2 && videoEl.videoWidth > 0) {
+        lastCaptureTime = now;
+        try {
+          if (canvas.width !== videoEl.videoWidth || canvas.height !== videoEl.videoHeight) {
+            canvas.width = videoEl.videoWidth;
+            canvas.height = videoEl.videoHeight;
+          }
+          const bitmap = await createImageBitmap(videoEl);
+          lookaheadFrameQueue.push({
+            bitmap,
+            timestamp: performance.now()
+          });
+        } catch (e) {}
+      }
+
+      // 2. Deliver frame delayed by state.lookaheadDelay seconds
+      const delayMs = state.lookaheadDelay * 1000;
+      const perfNow = performance.now();
+      let readyFrame = null;
+
+      while (lookaheadFrameQueue.length > 0 && (perfNow - lookaheadFrameQueue[0].timestamp) >= delayMs) {
+        if (readyFrame) {
+          readyFrame.bitmap.close();
+        }
+        readyFrame = lookaheadFrameQueue.shift();
+      }
+
+      if (readyFrame) {
+        ctx.drawImage(readyFrame.bitmap, 0, 0, canvas.width, canvas.height);
+        readyFrame.bitmap.close();
+      }
+
+      // Safety: prune queue to prevent GPU texture memory accumulation
+      const maxQueueLength = Math.ceil(targetFps * (state.lookaheadDelay + 1.5));
+      while (lookaheadFrameQueue.length > maxQueueLength) {
+        const discarded = lookaheadFrameQueue.shift();
+        if (discarded && discarded.bitmap) {
+          try { discarded.bitmap.close(); } catch (e) {}
+        }
+      }
+
+      lookaheadRafId = requestAnimationFrame(frameLoop);
+    }
+
+    lookaheadRafId = requestAnimationFrame(frameLoop);
+  }
+
+  function stopLookaheadVideoLoop() {
+    isLookaheadRunning = false;
+    if (lookaheadRafId) {
+      cancelAnimationFrame(lookaheadRafId);
+      lookaheadRafId = null;
+    }
+
+    if (lookaheadFrameQueue.length > 0) {
+      for (const item of lookaheadFrameQueue) {
+        if (item && item.bitmap) {
+          try { item.bitmap.close(); } catch (e) {}
+        }
+      }
+      lookaheadFrameQueue = [];
+    }
+
+    if (elements.capturedVideoElement) {
+      try {
+        elements.capturedVideoElement.pause();
+        elements.capturedVideoElement.srcObject = null;
+      } catch (e) {}
+    }
+
+    if (elements.lookaheadVideoCanvas) {
+      elements.lookaheadVideoCanvas.style.display = 'none';
+    }
+    if (elements.lookaheadBadge) {
+      elements.lookaheadBadge.style.display = 'none';
+    }
+  }
+
+  // =========================================================================
   // 6. AUDIO CAPTURE: DISPLAY/SCREEN (DEFAULT) & MICROPHONE
   // =========================================================================
 
@@ -720,10 +917,11 @@
           return null;
         }
 
-        // Direct digital system/tab capture — works seamlessly with YouTube on desktop
+        // Direct digital system/tab capture — with suppressLocalAudioPlayback to prevent browser double-playback echo!
         stream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
           audio: {
+            suppressLocalAudioPlayback: true,
             echoCancellation: false,
             noiseSuppression: false,
             autoGainControl: false
@@ -741,6 +939,7 @@
         // Handle user clicking "Stop Sharing" on browser bar
         stream.getVideoTracks().forEach(track => {
           track.onended = () => {
+            stopLookaheadVideoLoop();
             if (state.isDubbing) stopDubbing();
           };
         });
@@ -758,6 +957,11 @@
 
       state.mediaStream = stream;
       setupAudioGraph(stream, isScreen);
+
+      if (state.lookaheadSyncEnabled && isScreen) {
+        startLookaheadVideoLoop();
+      }
+
       return stream;
     } catch (err) {
       console.error('Audio capture permission error:', err);
@@ -1124,7 +1328,7 @@
    * 3. Translates text concurrently
    * 4. Feeds translation directly into the concurrent gapless audio pipeline
    */
-  async function dispatchUtteranceChunk(originalText) {
+  async function dispatchUtteranceChunk(originalText, captureCtxTime) {
     if (!originalText || !originalText.trim()) return;
     const text = originalText.trim();
 
@@ -1155,8 +1359,8 @@
       // Append to session log
       logTranscript(timestamp, text, translatedText);
 
-      // Push into streaming pipelined audio queue
-      enqueueAudioChunk(translatedText);
+      // Push into streaming pipelined audio queue with capture timestamp for lookahead sync
+      enqueueAudioChunk(translatedText, captureCtxTime);
     } catch (err) {
       console.error('Error dispatching utterance chunk:', err);
       setStatus('error');
@@ -1238,12 +1442,13 @@
   /**
    * Enqueue translated text and immediately begin pre-fetching its audio in background
    */
-  function enqueueAudioChunk(text) {
+  function enqueueAudioChunk(text, captureCtxTime) {
     if (!text || !text.trim()) return;
 
     const trimmed = text.trim();
     const item = {
       text: trimmed,
+      captureCtxTime: captureCtxTime || (state.audioCtx ? state.audioCtx.currentTime : 0),
       fetchPromise: prefetchAudioBuffer(trimmed)
     };
 
@@ -1294,7 +1499,14 @@
 
         const now = ctx.currentTime;
         // Schedule next chunk seamlessly at the exact microsecond previous chunk finishes
-        const startTime = Math.max(now, scheduledEndTime);
+        let startTime = Math.max(now, scheduledEndTime);
+
+        // Lookahead Lip-Sync mode: synchronize dubbed TTS audio with the delayed canvas video frame!
+        if (state.lookaheadSyncEnabled && currentItem.captureCtxTime) {
+          const targetLipSyncTime = currentItem.captureCtxTime + state.lookaheadDelay;
+          startTime = Math.max(startTime, targetLipSyncTime);
+        }
+
         const duration = audioBuffer.duration / state.voiceRate;
         scheduledEndTime = startTime + duration;
 
@@ -1733,9 +1945,13 @@
     localStorage.setItem(STORAGE_KEYS.CAPTURE_SOURCE, state.captureSource);
     elements.statSource.innerHTML = `Source: <strong>${state.captureSource === 'display' ? 'Screen/Tab' : 'Mic'}</strong>`;
 
-    // Loopback
+    // Loopback & Audio Routing
     state.micPassthrough = elements.micLoopbackToggle.checked;
     localStorage.setItem(STORAGE_KEYS.MIC_PASSTHROUGH, state.micPassthrough);
+    if (elements.routeScreenToOutputToggle) {
+      state.routeScreenToOutput = elements.routeScreenToOutputToggle.checked;
+      localStorage.setItem(STORAGE_KEYS.ROUTE_SCREEN_TO_OUTPUT, state.routeScreenToOutput);
+    }
 
     // Languages
     state.srcLang = elements.srcLangSelect.value;
@@ -1898,8 +2114,51 @@
       elements.voicePitchVal.textContent = `${parseFloat(elements.voicePitchSlider.value).toFixed(2)}x`;
     });
     elements.duckingDepthSlider.addEventListener('input', () => {
-      elements.duckingDepthVal.textContent = `${elements.duckingDepthSlider.value}% (-${100 - elements.duckingDepthSlider.value}% duck)`;
+      const val = parseInt(elements.duckingDepthSlider.value, 10);
+      const desc = val === 0 ? '0% (Total Mute -100%)' : `${val}% (-${100 - val}% duck)`;
+      elements.duckingDepthVal.textContent = desc;
     });
+
+    // Lookahead Lip-Sync Controls
+    if (elements.lookaheadSyncToggle) {
+      elements.lookaheadSyncToggle.addEventListener('change', () => {
+        state.lookaheadSyncEnabled = elements.lookaheadSyncToggle.checked;
+        localStorage.setItem(STORAGE_KEYS.LOOKAHEAD_SYNC_ENABLED, state.lookaheadSyncEnabled);
+        if (elements.syncSliderGroup) {
+          elements.syncSliderGroup.style.display = state.lookaheadSyncEnabled ? 'flex' : 'none';
+        }
+        if (state.isDubbing && state.captureSource === 'display') {
+          if (state.lookaheadSyncEnabled) {
+            startLookaheadVideoLoop();
+          } else {
+            stopLookaheadVideoLoop();
+          }
+        }
+      });
+    }
+
+    if (elements.lookaheadDelaySlider) {
+      elements.lookaheadDelaySlider.addEventListener('input', () => {
+        state.lookaheadDelay = parseFloat(elements.lookaheadDelaySlider.value);
+        if (elements.lookaheadDelayVal) {
+          elements.lookaheadDelayVal.textContent = `${state.lookaheadDelay.toFixed(1)}s`;
+        }
+        if (elements.lookaheadBadgeText) {
+          elements.lookaheadBadgeText.textContent = `Lookahead Lip-Sync: ${state.lookaheadDelay.toFixed(1)}s Delay`;
+        }
+        localStorage.setItem(STORAGE_KEYS.LOOKAHEAD_DELAY, state.lookaheadDelay);
+        if (state.screenDelayNode && state.audioCtx) {
+          state.screenDelayNode.delayTime.setValueAtTime(state.lookaheadDelay, state.audioCtx.currentTime);
+        }
+      });
+    }
+
+    if (elements.routeScreenToOutputToggle) {
+      elements.routeScreenToOutputToggle.addEventListener('change', () => {
+        state.routeScreenToOutput = elements.routeScreenToOutputToggle.checked;
+        localStorage.setItem(STORAGE_KEYS.ROUTE_SCREEN_TO_OUTPUT, state.routeScreenToOutput);
+      });
+    }
 
     // Test Voice
     elements.testVoiceBtn.addEventListener('click', () => {
@@ -2060,7 +2319,24 @@
     elements.voicePitchVal.textContent = `${state.voicePitch.toFixed(2)}x`;
     elements.duckingEnabledCheck.checked = state.duckingEnabled;
     elements.duckingDepthSlider.value = state.duckingDepth;
-    elements.duckingDepthVal.textContent = `${state.duckingDepth}% (-${100 - state.duckingDepth}% duck)`;
+    const initialDepthDesc = state.duckingDepth === 0 ? '0% (Total Mute -100%)' : `${state.duckingDepth}% (-${100 - state.duckingDepth}% duck)`;
+    elements.duckingDepthVal.textContent = initialDepthDesc;
+
+    if (elements.routeScreenToOutputToggle) {
+      elements.routeScreenToOutputToggle.checked = state.routeScreenToOutput;
+    }
+    if (elements.lookaheadSyncToggle) {
+      elements.lookaheadSyncToggle.checked = state.lookaheadSyncEnabled;
+    }
+    if (elements.syncSliderGroup) {
+      elements.syncSliderGroup.style.display = state.lookaheadSyncEnabled ? 'flex' : 'none';
+    }
+    if (elements.lookaheadDelaySlider) {
+      elements.lookaheadDelaySlider.value = state.lookaheadDelay;
+    }
+    if (elements.lookaheadDelayVal) {
+      elements.lookaheadDelayVal.textContent = `${state.lookaheadDelay.toFixed(1)}s`;
+    }
 
     elements.statSource.innerHTML = `Source: <strong>${state.captureSource === 'display' ? 'Screen/Tab' : 'Mic'}</strong>`;
     elements.statEngineVal.textContent = state.ttsEngine === 'speechSynthesis' ? 'SpeechSynth (Fast)' : 'OpenRouter TTS';
