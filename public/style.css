@@ -1233,7 +1233,13 @@ body {
   }
 
   /* Remove bulky desktop video test bench on mobile for minimalist, clutter-free UX */
+  .testbench-card,
   .playground-card {
+    display: none !important;
+  }
+
+  /* In mobile / Android, hide redundant APK download button from the header */
+  #headerApkBtn {
     display: none !important;
   }
 
