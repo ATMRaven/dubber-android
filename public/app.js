@@ -71,7 +71,8 @@
     customModel: localStorage.getItem(STORAGE_KEYS.CUSTOM_MODEL) || '',
 
     // TTS & Voice
-    ttsEngine: localStorage.getItem(STORAGE_KEYS.TTS_ENGINE) || 'deepgram',
+    ttsEngine: localStorage.getItem(STORAGE_KEYS.TTS_ENGINE) || 'mistral',
+    mistralVoice: localStorage.getItem('dubber_mistral_voice') || 'fr_marie_happy',
     voiceUri: localStorage.getItem(STORAGE_KEYS.VOICE_URI) || '',
     voiceRate: parseFloat(localStorage.getItem(STORAGE_KEYS.VOICE_RATE)) || 1.10,
     voicePitch: parseFloat(localStorage.getItem(STORAGE_KEYS.VOICE_PITCH)) || 1.00,
@@ -179,6 +180,8 @@
     customModelInput: document.getElementById('customModelInput'),
     testApiKeyBtn: document.getElementById('testApiKeyBtn'),
     ttsEngineSelect: document.getElementById('ttsEngineSelect'),
+    mistralVoiceGroup: document.getElementById('mistralVoiceGroup'),
+    mistralVoiceSelect: document.getElementById('mistralVoiceSelect'),
     speechSynthVoiceGroup: document.getElementById('speechSynthVoiceGroup'),
     refreshVoicesBtn: document.getElementById('refreshVoicesBtn'),
     voiceSelect: document.getElementById('voiceSelect'),
@@ -1380,7 +1383,61 @@
   async function prefetchAudioBuffer(text) {
     const langPrefix = state.tgtLang.split('-')[0].toLowerCase();
 
-    // 1. Deepgram Aura-2 (Ultra-fast, natively supports French, German, Spanish, English, Dutch, Italian, Japanese)
+    // 1. Mistral Voxtral (Ultra-Natural French and English Studio Neural TTS)
+    if (state.ttsEngine === 'mistral') {
+      if (langPrefix === 'fr' || langPrefix === 'en') {
+        try {
+          const url = 'https://dubber.atmr.workers.dev/api/mistral/tts';
+          let chosenVoice = state.mistralVoice;
+          if (!chosenVoice || (langPrefix === 'fr' && !chosenVoice.startsWith('fr_')) || (langPrefix === 'en' && !chosenVoice.startsWith('en_') && !chosenVoice.startsWith('gb_'))) {
+            chosenVoice = langPrefix === 'fr' ? 'fr_marie_happy' : 'en_paul_happy';
+          }
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text: text,
+              target: state.tgtLang,
+              voice: chosenVoice
+            })
+          });
+
+          if (res.ok) {
+            const arrayBuffer = await res.arrayBuffer();
+            const ctx = initAudioContext();
+            if (ctx.state === 'suspended') await ctx.resume();
+            return await ctx.decodeAudioData(arrayBuffer);
+          }
+        } catch (err) {
+          console.warn('Mistral TTS prefetch failed, trying Deepgram fallback:', err.message);
+        }
+      }
+      
+      // For non-FR/EN languages (e.g. Spanish, German, Japanese), gracefully use Deepgram Aura-2
+      if (langPrefix !== 'ar') {
+        try {
+          const dgUrl = 'https://dubber.atmr.workers.dev/api/deepgram/tts';
+          const dgRes = await fetch(dgUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text: text,
+              target: state.tgtLang
+            })
+          });
+          if (dgRes.ok) {
+            const arrayBuffer = await dgRes.arrayBuffer();
+            const ctx = initAudioContext();
+            if (ctx.state === 'suspended') await ctx.resume();
+            return await ctx.decodeAudioData(arrayBuffer);
+          }
+        } catch (dgErr) {
+          console.warn('Deepgram fallback failed:', dgErr.message);
+        }
+      }
+    }
+
+    // 2. Deepgram Aura-2 (Ultra-fast, natively supports French, German, Spanish, English, Dutch, Italian, Japanese)
     // Deepgram Aura-2 does not support Arabic (ar)
     if (state.ttsEngine === 'deepgram' && langPrefix !== 'ar') {
       try {
@@ -1973,6 +2030,10 @@
     localStorage.setItem(STORAGE_KEYS.CUSTOM_MODEL, state.customModel);
 
     state.ttsEngine = elements.ttsEngineSelect.value;
+    if (elements.mistralVoiceSelect) {
+      state.mistralVoice = elements.mistralVoiceSelect.value;
+      localStorage.setItem('dubber_mistral_voice', state.mistralVoice);
+    }
     state.voiceUri = elements.voiceSelect.value;
     state.voiceRate = parseFloat(elements.voiceRateSlider.value);
     state.voicePitch = parseFloat(elements.voicePitchSlider.value);
@@ -1985,9 +2046,11 @@
     localStorage.setItem(STORAGE_KEYS.VOICE_RATE, state.voiceRate);
     localStorage.setItem(STORAGE_KEYS.VOICE_PITCH, state.voicePitch);
 
-    elements.statEngineVal.textContent = state.ttsEngine === 'deepgram' 
-      ? 'Deepgram Aura-2 (<200ms)' 
-      : (state.ttsEngine === 'speechSynthesis' ? 'SpeechSynth (Fast)' : 'OpenRouter TTS');
+    elements.statEngineVal.textContent = state.ttsEngine === 'mistral'
+      ? 'Mistral Voxtral (FR/EN)'
+      : (state.ttsEngine === 'deepgram' 
+        ? 'Deepgram Aura-2 (<200ms)' 
+        : (state.ttsEngine === 'speechSynthesis' ? 'SpeechSynth (Fast)' : 'OpenRouter TTS'));
 
     // Ducking
     state.duckingEnabled = elements.duckingEnabledCheck.checked;
@@ -2090,17 +2153,12 @@
 
     // TTS Engine Select
     elements.ttsEngineSelect.addEventListener('change', () => {
-      if (elements.ttsEngineSelect.value === 'openrouter') {
-        elements.openRouterVoiceGroup.classList.remove('hidden');
-        elements.speechSynthVoiceGroup.classList.add('hidden');
-      } else if (elements.ttsEngineSelect.value === 'speechSynthesis') {
-        elements.openRouterVoiceGroup.classList.add('hidden');
-        elements.speechSynthVoiceGroup.classList.remove('hidden');
-      } else {
-        // Deepgram Aura-2
-        elements.openRouterVoiceGroup.classList.add('hidden');
-        elements.speechSynthVoiceGroup.classList.add('hidden');
+      const eng = elements.ttsEngineSelect.value;
+      if (elements.mistralVoiceGroup) {
+        elements.mistralVoiceGroup.classList.toggle('hidden', eng !== 'mistral');
       }
+      elements.openRouterVoiceGroup.classList.toggle('hidden', eng !== 'openrouter');
+      elements.speechSynthVoiceGroup.classList.toggle('hidden', eng !== 'speechSynthesis');
     });
 
     // Sliders
@@ -2159,9 +2217,14 @@
 
     // Test Voice
     elements.testVoiceBtn.addEventListener('click', () => {
-      const testPhrase = state.tgtLang.startsWith('es') 
-        ? 'Hola, esta es una prueba de voz doblada en tiempo real.'
-        : 'Hello, this is a test of real-time synthesized speech.';
+      const langPrefix = state.tgtLang.split('-')[0].toLowerCase();
+      const testPhrase = langPrefix === 'fr'
+        ? 'Bonjour, ceci est un test de synthèse vocale en temps réel.'
+        : (langPrefix === 'es'
+          ? 'Hola, esta es una prueba de voz doblada en tiempo real.'
+          : (langPrefix === 'ar'
+            ? 'مرحبا، هذا اختبار للصوت المدبلج في الوقت الفعلي.'
+            : 'Hello, this is a test of real-time synthesized speech.'));
       enqueueAudioChunk(testPhrase);
     });
 
@@ -2218,6 +2281,11 @@
       elements.srcLangSelect.value = 'en-US';
       elements.tgtLangSelect.value = 'es-ES';
       elements.modelSelect.value = 'groq-server';
+      elements.ttsEngineSelect.value = 'mistral';
+      if (elements.mistralVoiceSelect) elements.mistralVoiceSelect.value = 'fr_marie_happy';
+      if (elements.mistralVoiceGroup) elements.mistralVoiceGroup.classList.remove('hidden');
+      elements.openRouterVoiceGroup.classList.add('hidden');
+      elements.speechSynthVoiceGroup.classList.add('hidden');
       elements.voiceRateSlider.value = '1.1';
       elements.voiceRateVal.textContent = '1.10x';
       elements.voicePitchSlider.value = '1.0';
@@ -2324,6 +2392,15 @@
     }
 
     elements.ttsEngineSelect.value = state.ttsEngine;
+    if (elements.mistralVoiceSelect) {
+      elements.mistralVoiceSelect.value = state.mistralVoice;
+    }
+    if (elements.mistralVoiceGroup) {
+      elements.mistralVoiceGroup.classList.toggle('hidden', state.ttsEngine !== 'mistral');
+    }
+    elements.openRouterVoiceGroup.classList.toggle('hidden', state.ttsEngine !== 'openrouter');
+    elements.speechSynthVoiceGroup.classList.toggle('hidden', state.ttsEngine !== 'speechSynthesis');
+
     if (elements.openRouterVoiceSlug) {
       elements.openRouterVoiceSlug.value = state.openRouterVoiceSlug;
     }
@@ -2353,7 +2430,11 @@
     }
 
     elements.statSource.innerHTML = `Source: <strong>${state.captureSource === 'display' ? 'Screen/Tab' : 'Mic'}</strong>`;
-    elements.statEngineVal.textContent = state.ttsEngine === 'speechSynthesis' ? 'SpeechSynth (Fast)' : 'OpenRouter TTS';
+    elements.statEngineVal.textContent = state.ttsEngine === 'mistral'
+      ? 'Mistral Voxtral (FR/EN)'
+      : (state.ttsEngine === 'deepgram' 
+        ? 'Deepgram Aura-2 (<200ms)' 
+        : (state.ttsEngine === 'speechSynthesis' ? 'SpeechSynth (Fast)' : 'OpenRouter TTS'));
     elements.statDuckingVal.textContent = state.duckingEnabled ? `Active (${state.duckingDepth}%)` : 'Disabled';
 
     populateVoiceList();

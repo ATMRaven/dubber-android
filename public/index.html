@@ -503,13 +503,26 @@
         <div class="form-group">
           <label for="ttsEngineSelect" class="form-label">TTS Engine</label>
           <select id="ttsEngineSelect" class="form-select">
-            <option value="deepgram" selected>Deepgram Aura-2 (Ultra-Fast &lt;200ms / Natural Voices)</option>
+            <option value="mistral" selected>Mistral Voxtral (Ultra-Natural FR &amp; EN, Blazing Fast - Recommended)</option>
+            <option value="deepgram">Deepgram Aura-2 (Multilingual: ES, DE, JA, FR, EN)</option>
             <option value="speechSynthesis">On-Device SpeechSynthesis (Instant / 100% Free)</option>
             <option value="openrouter">OpenRouter Audio / TTS Endpoint</option>
           </select>
         </div>
 
-        <div class="form-group" id="speechSynthVoiceGroup">
+        <div class="form-group" id="mistralVoiceGroup">
+          <label for="mistralVoiceSelect" class="form-label">Mistral Voxtral Voice</label>
+          <select id="mistralVoiceSelect" class="form-select">
+            <option value="fr_marie_happy" selected>fr_marie_happy (Marie - Radiant &amp; Natural, French)</option>
+            <option value="fr_marie">fr_marie (Marie - Classic, French)</option>
+            <option value="en_paul_happy">en_paul_happy (Paul - Warm &amp; Friendly, English)</option>
+            <option value="gb_jane_confident">gb_jane_confident (Jane - Crisp &amp; Confident, English)</option>
+            <option value="gb_oliver_confident">gb_oliver_confident (Oliver - Clear &amp; Articulate, English)</option>
+          </select>
+          <span class="field-hint" style="font-size: 11px; color: var(--color-zinc-400); margin-top: 4px; display: block;">Voxtral Mini TTS: Studio-grade expressive neural speech. Auto-selects French or English based on target language.</span>
+        </div>
+
+        <div class="form-group hidden" id="speechSynthVoiceGroup">
           <div class="label-with-action">
             <label for="voiceSelect" class="form-label">Installed Voice</label>
             <button type="button" class="btn-link" id="refreshVoicesBtn">Reload Voices</button>
@@ -522,7 +535,7 @@
         <div class="form-group hidden" id="openRouterVoiceGroup">
           <label for="openRouterVoiceSlug" class="form-label">OpenRouter Audio Model (TTS)</label>
           <input type="text" id="openRouterVoiceSlug" class="form-input" placeholder="e.g. openai/tts-1 or elevenlabs/eleven-multilingual-v2" value="openai/tts-1">
-          <span class="field-hint" style="font-size: 11px; color: var(--color-zinc-400); margin-top: 4px; display: block;">Supports multilingual speech (French, Arabic, Spanish, etc.). Note: Deepgram Aura is English-only.</span>
+          <span class="field-hint" style="font-size: 11px; color: var(--color-zinc-400); margin-top: 4px; display: block;">Supports multilingual speech (French, Arabic, Spanish, etc.).</span>
         </div>
 
         <!-- Voice Sliders -->

@@ -22,6 +22,7 @@ export default {
         platform: 'Cloudflare Workers Edge',
         ai_enabled: !!env.AI,
         deepgram_enabled: !!env.DEEPGRAM_API_KEY,
+        mistral_enabled: !!env.MISTRAL_API_KEY,
         openrouter_enabled: !!env.OPENROUTER_API_KEY,
         groq_enabled: !!env.GROQ_API_KEY,
         timestamp: new Date().toISOString()
@@ -109,6 +110,94 @@ export default {
         }
 
         const audioBlob = await dgRes.arrayBuffer();
+        return new Response(audioBlob, {
+          headers: {
+            'Content-Type': 'audio/mpeg',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=3600'
+          }
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+        });
+      }
+    }
+
+    // Mistral Voxtral Ultra-Fast Neural TTS Endpoint (English & French)
+    if (url.pathname === '/api/mistral/tts') {
+      try {
+        let text = '';
+        let targetLang = 'fr';
+        let voice = '';
+
+        if (request.method === 'POST') {
+          const body = await request.json().catch(() => ({}));
+          text = body.text || '';
+          targetLang = body.target || body.lang || 'fr';
+          voice = body.voice || '';
+        } else {
+          text = url.searchParams.get('text') || '';
+          targetLang = url.searchParams.get('target') || url.searchParams.get('lang') || 'fr';
+          voice = url.searchParams.get('voice') || '';
+        }
+
+        if (!text || !text.trim()) {
+          return new Response(JSON.stringify({ error: 'Missing text' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        const tCode = targetLang.split('-')[0].toLowerCase();
+        if (tCode !== 'fr' && tCode !== 'en') {
+          return new Response(JSON.stringify({ error: `Mistral Voxtral TTS supports French and English only. Language '${tCode}' not supported.` }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        // Default voice selection
+        if (!voice) {
+          voice = tCode === 'fr' ? 'fr_marie_happy' : 'en_paul_happy';
+        }
+
+        const authHeader = request.headers.get('Authorization');
+        const mistralKey = (authHeader && authHeader.startsWith('Bearer '))
+          ? authHeader.slice(7).trim()
+          : (env.MISTRAL_API_KEY || '');
+
+        if (!mistralKey) {
+          return new Response(JSON.stringify({ error: 'Mistral API key not configured on server' }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        const mistralRes = await fetch('https://api.mistral.ai/v1/audio/speech', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${mistralKey}`,
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+          },
+          body: JSON.stringify({
+            model: 'voxtral-mini-tts-latest',
+            voice: voice,
+            input: text.trim()
+          })
+        });
+
+        if (!mistralRes.ok) {
+          const errText = await mistralRes.text();
+          return new Response(JSON.stringify({ error: `Mistral TTS failed: ${errText}` }), {
+            status: mistralRes.status,
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        const audioBlob = await mistralRes.arrayBuffer();
         return new Response(audioBlob, {
           headers: {
             'Content-Type': 'audio/mpeg',
