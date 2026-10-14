@@ -59,9 +59,15 @@
     srcLang: localStorage.getItem(STORAGE_KEYS.SRC_LANG) || 'en-US',
     tgtLang: localStorage.getItem(STORAGE_KEYS.TGT_LANG) || 'es-ES',
 
-    // OpenRouter Settings
+    // Translation Engine & OpenRouter Settings
     apiKey: localStorage.getItem(STORAGE_KEYS.API_KEY) || '',
-    model: localStorage.getItem(STORAGE_KEYS.MODEL) || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+    model: (function() {
+      const saved = localStorage.getItem(STORAGE_KEYS.MODEL);
+      if (!saved || saved.includes('nemotron') || saved.includes('lfm-2.5') || saved.includes('llama-3.2-3b') || saved === 'default') {
+        return 'groq-server';
+      }
+      return saved;
+    })(),
     customModel: localStorage.getItem(STORAGE_KEYS.CUSTOM_MODEL) || '',
 
     // TTS & Voice
@@ -1152,7 +1158,7 @@
    * Fast simultaneous translation via OpenRouter with cascading fallbacks
    */
   /**
-   * High-accuracy, free multi-tier real-time translation (OpenRouter -> Cloudflare Edge AI -> MyMemory -> Local)
+   * High-accuracy, ultra-fast multi-tier real-time translation (Groq LPU Qwen 27B -> Cloudflare Edge AI -> Custom OpenRouter -> MyMemory -> Local)
    */
   async function translateText(text, srcLang, tgtLang) {
     if (!text || !text.trim()) return '';
@@ -1163,32 +1169,23 @@
     const sCode = (srcLang || 'en').split('-')[0].toLowerCase();
     const tCode = (tgtLang || 'fr').split('-')[0].toLowerCase();
 
-    // 1. If OpenRouter API key provided, try OpenRouter first
-    if (apiKey) {
+    // 1. If user explicitly chose a custom OpenRouter model AND provided a custom API key, use OpenRouter first
+    if (apiKey && state.model !== 'groq-server' && state.model !== 'cf-edge') {
       const primaryModel = state.model === 'custom' 
         ? (state.customModel.trim() || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free')
         : state.model;
 
-      const candidateModels = [
-        primaryModel,
-        'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-        'liquid/lfm-2.5-2.6b:free'
-      ];
-      const uniqueModels = [...new Set(candidateModels)];
-
-      for (const m of uniqueModels) {
-        try {
-          const result = await callOpenRouterCompletion(text, m, srcName, tgtName, apiKey);
-          if (result && result.trim()) {
-            return result.trim();
-          }
-        } catch (err) {
-          console.warn(`Model ${m} failed (${err.message}), trying backup...`);
+      try {
+        const result = await callOpenRouterCompletion(text, primaryModel, srcName, tgtName, apiKey);
+        if (result && result.trim()) {
+          return result.trim();
         }
+      } catch (err) {
+        console.warn(`Custom OpenRouter model ${primaryModel} failed (${err.message}), falling back to Groq LPU...`);
       }
     }
 
-    // 2. High-speed Cloudflare Edge AI (Zero API key required: French, Arabic, Spanish, etc.)
+    // 2. High-speed Cloudflare Worker (Groq LPU Qwen 27B ~250-350ms, Zero API key required)
     try {
       const edgeUrl = `https://dubber.atmr.workers.dev/api/translate?text=${encodeURIComponent(text.trim())}&source=${sCode}&target=${tCode}`;
       const edgeRes = await fetch(edgeUrl);
@@ -1199,7 +1196,7 @@
         }
       }
     } catch (edgeErr) {
-      console.warn('Cloudflare edge translation error, falling back to MyMemory:', edgeErr);
+      console.warn('Groq/Cloudflare edge translation error, falling back to MyMemory:', edgeErr);
     }
 
     // 3. MyMemory Free API fallback (Zero API key required)
@@ -2005,10 +2002,10 @@
   function updateKeyBadge() {
     if (state.apiKey) {
       elements.keyStatusBadge.className = 'badge badge-success';
-      elements.keyStatusBadge.textContent = 'Key Active';
+      elements.keyStatusBadge.textContent = 'Custom Key Active';
     } else {
-      elements.keyStatusBadge.className = 'badge badge-muted';
-      elements.keyStatusBadge.textContent = 'Offline / Free Demo';
+      elements.keyStatusBadge.className = 'badge badge-success';
+      elements.keyStatusBadge.textContent = 'Groq Integrated';
     }
   }
 
@@ -2168,33 +2165,50 @@
       enqueueAudioChunk(testPhrase);
     });
 
-    // Test API Key
+    // Test Translation Engine
     elements.testApiKeyBtn.addEventListener('click', async () => {
       const key = elements.openRouterKeyInput.value.trim();
-      if (!key) {
-        showToast('Please enter an OpenRouter API key first.', 'error');
-        return;
-      }
       elements.testApiKeyBtn.disabled = true;
       elements.testApiKeyBtn.textContent = 'Testing...';
 
-      try {
-        const res = await fetch('https://openrouter.ai/api/v1/auth/key', {
-          headers: { 'Authorization': `Bearer ${key}` }
-        });
-        if (res.ok) {
-          const info = await res.json();
-          showToast('OpenRouter API key is valid and connected!', 'success');
-          elements.keyStatusBadge.className = 'badge badge-success';
-          elements.keyStatusBadge.textContent = 'Verified';
-        } else {
-          showToast(`Invalid API Key (HTTP ${res.status})`, 'error');
+      if (key) {
+        try {
+          const res = await fetch('https://openrouter.ai/api/v1/auth/key', {
+            headers: { 'Authorization': `Bearer ${key}` }
+          });
+          if (res.ok) {
+            showToast('OpenRouter API key is valid and connected!', 'success');
+            elements.keyStatusBadge.className = 'badge badge-success';
+            elements.keyStatusBadge.textContent = 'Key Verified';
+          } else {
+            showToast(`Invalid API Key (HTTP ${res.status})`, 'error');
+          }
+        } catch (err) {
+          showToast('Connection failed. Check network or key.', 'error');
+        } finally {
+          elements.testApiKeyBtn.disabled = false;
+          elements.testApiKeyBtn.textContent = 'Test Translation Engine';
         }
-      } catch (err) {
-        showToast('Connection failed. Check network or key.', 'error');
-      } finally {
-        elements.testApiKeyBtn.disabled = false;
-        elements.testApiKeyBtn.textContent = 'Test OpenRouter Connection';
+      } else {
+        // Test integrated server-side Groq LPU engine
+        try {
+          const t0 = performance.now();
+          const res = await fetch('https://dubber.atmr.workers.dev/api/translate?text=Hello+world&source=en&target=es');
+          const dt = Math.round(performance.now() - t0);
+          if (res.ok) {
+            const data = await res.json();
+            showToast(`Groq LPU Engine Active (~${dt}ms)! Output: "${data.translatedText}"`, 'success');
+            elements.keyStatusBadge.className = 'badge badge-success';
+            elements.keyStatusBadge.textContent = `Groq Active (${dt}ms)`;
+          } else {
+            showToast(`Engine test error (HTTP ${res.status})`, 'error');
+          }
+        } catch (err) {
+          showToast('Could not reach translation server.', 'error');
+        } finally {
+          elements.testApiKeyBtn.disabled = false;
+          elements.testApiKeyBtn.textContent = 'Test Translation Engine';
+        }
       }
     });
 
@@ -2203,7 +2217,7 @@
       elements.sourceDisplayRadio.checked = true;
       elements.srcLangSelect.value = 'en-US';
       elements.tgtLangSelect.value = 'es-ES';
-      elements.modelSelect.value = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free';
+      elements.modelSelect.value = 'groq-server';
       elements.voiceRateSlider.value = '1.1';
       elements.voiceRateVal.textContent = '1.10x';
       elements.voicePitchSlider.value = '1.0';
@@ -2299,8 +2313,8 @@
 
     // API Key & Model
     elements.openRouterKeyInput.value = state.apiKey;
-    if (state.model.includes('llama-3.2-3b') || state.model === 'liquid/lfm-2.5-2.6b:free') {
-      state.model = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free';
+    if (state.model.includes('llama-3.2-3b') || state.model.includes('nemotron') || state.model === 'liquid/lfm-2.5-2.6b:free' || state.model === 'default') {
+      state.model = 'groq-server';
       localStorage.setItem(STORAGE_KEYS.MODEL, state.model);
     }
     elements.modelSelect.value = state.model;

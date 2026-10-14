@@ -22,6 +22,8 @@ export default {
         platform: 'Cloudflare Workers Edge',
         ai_enabled: !!env.AI,
         deepgram_enabled: !!env.DEEPGRAM_API_KEY,
+        openrouter_enabled: !!env.OPENROUTER_API_KEY,
+        groq_enabled: !!env.GROQ_API_KEY,
         timestamp: new Date().toISOString()
       }), {
         headers: {
@@ -122,12 +124,26 @@ export default {
       }
     }
 
-    // Fast AI Translation endpoint
+    // Fast AI Translation endpoint (Integrated OpenRouter + Cloudflare Edge AI fallback)
     if (url.pathname === '/api/translate') {
       try {
-        const text = url.searchParams.get('text') || '';
-        const source = (url.searchParams.get('source') || 'en').split('-')[0].toLowerCase();
-        const target = (url.searchParams.get('target') || 'fr').split('-')[0].toLowerCase();
+        let text = '';
+        let source = 'en';
+        let target = 'fr';
+        let model = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free';
+
+        if (request.method === 'POST') {
+          const body = await request.json().catch(() => ({}));
+          text = body.text || '';
+          source = (body.source || 'en').split('-')[0].toLowerCase();
+          target = (body.target || 'fr').split('-')[0].toLowerCase();
+          model = body.model || model;
+        } else {
+          text = url.searchParams.get('text') || '';
+          source = (url.searchParams.get('source') || 'en').split('-')[0].toLowerCase();
+          target = (url.searchParams.get('target') || 'fr').split('-')[0].toLowerCase();
+          model = url.searchParams.get('model') || model;
+        }
 
         if (!text || !text.trim()) {
           return new Response(JSON.stringify({ translatedText: '' }), {
@@ -138,18 +154,55 @@ export default {
           });
         }
 
-        let translated = '';
-        if (env.AI) {
-          try {
-            // Use Llama 3.2 3B for high-fidelity translation
-            const langNames = {
-              en: 'English', fr: 'French', ar: 'Arabic', es: 'Spanish',
-              de: 'German', ja: 'Japanese', zh: 'Chinese', ko: 'Korean',
-              ru: 'Russian', it: 'Italian', pt: 'Portuguese', hi: 'Hindi'
-            };
-            const sName = langNames[source] || source;
-            const tName = langNames[target] || target;
+        const langNames = {
+          en: 'English', fr: 'French', ar: 'Arabic', es: 'Spanish',
+          de: 'German', ja: 'Japanese', zh: 'Chinese', ko: 'Korean',
+          ru: 'Russian', it: 'Italian', pt: 'Portuguese', hi: 'Hindi',
+          tr: 'Turkish', nl: 'Dutch', pl: 'Polish', id: 'Indonesian', vi: 'Vietnamese'
+        };
+        const sName = langNames[source] || source;
+        const tName = langNames[target] || target;
 
+        let translated = '';
+        let usedProvider = '';
+
+        // 1. Tier 1: Groq LPU Ultra-Fast Translation (~250-350ms, Qwen 3.8 27B)
+        if (env.GROQ_API_KEY) {
+          try {
+            const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${env.GROQ_API_KEY}`,
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+              },
+              body: JSON.stringify({
+                model: 'qwen/qwen3.8-27b',
+                messages: [
+                  { role: 'system', content: `You are an ultra-fast real-time speech translator. Translate the text from ${sName} into fluent, natural ${tName}. Output ONLY the direct translated phrase with zero explanations, zero quotes, and zero preamble.` },
+                  { role: 'user', content: text.trim() }
+                ],
+                max_tokens: 250,
+                temperature: 0.1
+              })
+            });
+
+            if (groqRes.ok) {
+              const groqData = await groqRes.json();
+              const content = groqData?.choices?.[0]?.message?.content;
+              if (content && content.trim()) {
+                translated = content.trim().replace(/^["']|["']$/g, '');
+                usedProvider = 'groq (qwen/qwen3.8-27b)';
+              }
+            }
+          } catch (groqErr) {
+            console.warn('Groq translation error, trying fallback:', groqErr);
+          }
+        }
+
+        // 2. Tier 2: Cloudflare Workers AI (@cf/meta/llama-3.2-3b-instruct)
+        if (!translated && env.AI) {
+          try {
             const res = await env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
               messages: [
                 { role: 'system', content: `You are an ultra-fast real-time translator. Translate the text from ${sName} into natural, accurate ${tName}. Return ONLY the direct translation text. Never add quotes, notes, explanations, or extra words.` },
@@ -160,13 +213,49 @@ export default {
 
             if (res && res.response) {
               translated = res.response.trim().replace(/^["']|["']$/g, '');
+              usedProvider = 'cloudflare-workers-ai (llama-3.2-3b)';
             }
           } catch (aiErr) {
             console.warn('Worker AI translation failed:', aiErr);
           }
         }
 
-        return new Response(JSON.stringify({ translatedText: translated }), {
+        // 3. Tier 3: OpenRouter Server-Side Fallback
+        if (!translated && env.OPENROUTER_API_KEY) {
+          try {
+            const orRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
+                'Content-Type': 'application/json',
+                'HTTP-Referer': 'https://dubber-web.pages.dev',
+                'X-Title': 'Dubber Studio'
+              },
+              body: JSON.stringify({
+                model: model,
+                messages: [
+                  { role: 'system', content: `You are an ultra-fast real-time speech translator. Translate the text from ${sName} into fluent, natural ${tName}. Output ONLY the direct translated phrase with zero explanations, zero quotes, and zero preamble.` },
+                  { role: 'user', content: text.trim() }
+                ],
+                max_tokens: 250,
+                temperature: 0.1
+              })
+            });
+
+            if (orRes.ok) {
+              const orData = await orRes.json();
+              const content = orData?.choices?.[0]?.message?.content;
+              if (content && content.trim()) {
+                translated = content.trim().replace(/^["']|["']$/g, '');
+                usedProvider = `openrouter (${model})`;
+              }
+            }
+          } catch (orErr) {
+            console.warn('Server OpenRouter translation failed:', orErr);
+          }
+        }
+
+        return new Response(JSON.stringify({ translatedText: translated, provider: usedProvider }), {
           headers: {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*'

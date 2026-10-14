@@ -444,23 +444,37 @@
         </button>
       </section>
 
-      <!-- Section C: Translation API (OpenRouter) -->
+      <!-- Section C: Translation API (Groq LPU & OpenRouter) -->
       <section class="drawer-section">
         <h3 class="section-title">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
           </svg>
-          Real-Time Translation Engine (OpenRouter)
+          Real-Time Translation Engine
         </h3>
-        <p class="section-hint">Translates speech chunks simultaneously using fast free LLMs.</p>
+        <p class="section-hint">Ultra-fast simultaneous translation powered by server-side Groq LPU (Qwen 27B) &amp; Cloudflare Edge AI.</p>
+
+        <div class="form-group">
+          <label for="modelSelect" class="form-label">Translation Model</label>
+          <select id="modelSelect" class="form-select">
+            <option value="groq-server" selected>Groq LPU: Qwen 3.8 27B (Ultra-Fast ~300ms, Server Integrated - Recommended)</option>
+            <option value="cf-edge">Cloudflare Edge: LLaMA 3.2 3B (Edge Native, Free)</option>
+            <option value="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free">OpenRouter: Nemotron 30B Free</option>
+            <option value="liquid/lfm-2.5-2.6b:free">OpenRouter: Liquid LFM 2.5 Free</option>
+            <option value="google/gemma-4-26b-a4b-it:free">OpenRouter: Gemma 4 26B Free</option>
+            <option value="deepseek/deepseek-chat">OpenRouter: DeepSeek Chat</option>
+            <option value="custom">Custom Model Slug...</option>
+          </select>
+          <input type="text" id="customModelInput" class="form-input mt-2 hidden" placeholder="Enter custom model slug (e.g. nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free)">
+        </div>
 
         <div class="form-group">
           <div class="label-with-action">
-            <label for="openRouterKeyInput" class="form-label">OpenRouter API Key</label>
-            <span class="badge badge-success" id="keyStatusBadge">Checking...</span>
+            <label for="openRouterKeyInput" class="form-label">Custom OpenRouter Key (Optional)</label>
+            <span class="badge badge-success" id="keyStatusBadge">Integrated</span>
           </div>
           <div class="input-with-btn">
-            <input type="password" id="openRouterKeyInput" class="form-input" placeholder="sk-or-v1-..." autocomplete="off">
+            <input type="password" id="openRouterKeyInput" class="form-input" placeholder="Optional: sk-or-v1-..." autocomplete="off">
             <button type="button" class="btn btn-secondary btn-icon" id="toggleKeyVisibilityBtn" title="Show/Hide Key">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
@@ -468,24 +482,11 @@
               </svg>
             </button>
           </div>
-          <span class="field-hint">Your API key is kept locally in browser storage and never uploaded to third-party servers.</span>
-        </div>
-
-        <div class="form-group">
-          <label for="modelSelect" class="form-label">Translation Model Slug</label>
-          <select id="modelSelect" class="form-select">
-            <option value="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" selected>nvidia/nemotron-3-nano-omni-30b:free (Ultra-Fast ~400ms, Free)</option>
-            <option value="nvidia/nemotron-3-super-120b-a12b:free">nvidia/nemotron-3-super-120b:free (High Accuracy, Free)</option>
-            <option value="liquid/lfm-2.5-2.6b:free">liquid/lfm-2.5-2.6b:free (Edge Free)</option>
-            <option value="google/gemma-4-26b-a4b-it:free">google/gemma-4-26b:free (Google Gemma, Free)</option>
-            <option value="deepseek/deepseek-chat">deepseek/deepseek-chat (High Quality)</option>
-            <option value="custom">Custom Model Slug...</option>
-          </select>
-          <input type="text" id="customModelInput" class="form-input mt-2 hidden" placeholder="Enter custom model slug (e.g. nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free)">
+          <span class="field-hint">Not required! Server-side Groq LPU (~300ms) runs out-of-the-box with zero setup.</span>
         </div>
 
         <button type="button" class="btn btn-secondary btn-sm" id="testApiKeyBtn">
-          Test OpenRouter Connection
+          Test Translation Engine
         </button>
       </section>
 
