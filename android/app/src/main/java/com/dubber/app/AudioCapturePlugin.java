@@ -111,12 +111,22 @@ public class AudioCapturePlugin extends Plugin {
         }
     }
 
+    private String mSrcLang = "en";
+    private String mTargetLang = "fr";
+    private String mVoice = "fr_marie_happy";
+    private String mEngine = "mistral";
+
     @PluginMethod
     public void startScreenCapture(PluginCall call) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             call.reject("Android 10 (API 29) or higher is required for internal audio capture");
             return;
         }
+
+        mSrcLang = call.getString("srcLang", "en");
+        mTargetLang = call.getString("targetLang", "fr");
+        mVoice = call.getString("voice", "fr_marie_happy");
+        mEngine = call.getString("engine", "mistral");
 
         if (getPermissionState("audio") != PermissionState.GRANTED) {
             requestPermissionForAlias("audio", call, "audioPermCallback");
@@ -155,6 +165,17 @@ public class AudioCapturePlugin extends Plugin {
                 }
             });
 
+            AudioCaptureService.setDubResultListener((orig, trans) -> {
+                try {
+                    JSObject data = new JSObject();
+                    data.put("original", orig);
+                    data.put("translated", trans);
+                    notifyListeners("dubResult", data);
+                } catch (Throwable t) {
+                    Log.e(TAG, "Error emitting dubResult: " + t.getMessage());
+                }
+            });
+
             Intent captureIntent = projectionManager.createScreenCaptureIntent();
             startActivityForResult(call, captureIntent, "mediaProjectionCallback");
         } catch (Throwable t) {
@@ -170,6 +191,10 @@ public class AudioCapturePlugin extends Plugin {
                 Intent serviceIntent = new Intent(getContext(), AudioCaptureService.class);
                 serviceIntent.setAction(AudioCaptureService.ACTION_START);
                 serviceIntent.putExtra(AudioCaptureService.EXTRA_RESULT_DATA, result.getData());
+                serviceIntent.putExtra("srcLang", mSrcLang);
+                serviceIntent.putExtra("targetLang", mTargetLang);
+                serviceIntent.putExtra("voice", mVoice);
+                serviceIntent.putExtra("engine", mEngine);
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     getContext().startForegroundService(serviceIntent);

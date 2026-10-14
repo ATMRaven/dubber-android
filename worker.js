@@ -34,6 +34,253 @@ export default {
       });
     }
 
+    // =========================================================================
+    // One-Shot Background Edge Dubbing Pipeline (WAV -> Transcribe -> Translate -> TTS -> MP3)
+    // =========================================================================
+    if (url.pathname === '/api/dub' && request.method === 'POST') {
+      try {
+        const audioBuffer = await request.arrayBuffer();
+        if (!audioBuffer || audioBuffer.byteLength < 500) {
+          return new Response(null, { status: 204 });
+        }
+
+        const srcLang = (url.searchParams.get('src') || 'en').split('-')[0].toLowerCase();
+        const targetLang = (url.searchParams.get('target') || 'fr').split('-')[0].toLowerCase();
+        const voice = url.searchParams.get('voice') || '';
+        const engine = (url.searchParams.get('engine') || 'mistral').toLowerCase();
+
+        const reqContentType = request.headers.get('Content-Type') || 'audio/wav';
+
+        // 1. Transcribe Audio (Deepgram Nova-2 <180ms or Cloudflare Whisper fallback)
+        let transcribedText = '';
+        if (env.DEEPGRAM_API_KEY) {
+          try {
+            const dgRes = await fetch(`https://api.deepgram.com/v1/listen?model=nova-2&language=${srcLang}&smart_format=true`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Token ${env.DEEPGRAM_API_KEY}`,
+                'Content-Type': reqContentType
+              },
+              body: audioBuffer
+            });
+            if (dgRes.ok) {
+              const dgData = await dgRes.json();
+              transcribedText = dgData.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim() || '';
+            }
+          } catch (dgErr) {
+            console.warn('Deepgram transcribe error in /api/dub:', dgErr);
+          }
+        }
+
+        if (!transcribedText && env.AI) {
+          try {
+            const audioArray = [...new Uint8Array(audioBuffer)];
+            const aiResponse = await env.AI.run('@cf/openai/whisper', { audio: audioArray });
+            if (aiResponse && aiResponse.text) {
+              transcribedText = aiResponse.text.trim();
+            }
+          } catch (aiErr) {
+            console.warn('Whisper fallback error in /api/dub:', aiErr);
+          }
+        }
+
+        const HALLUCINATIONS = [
+          /^\s*thank you[\s.!,]*$/i,
+          /^\s*thanks for watching[\s.!,]*$/i,
+          /^\s*thank you for watching[\s.!,]*$/i,
+          /^\s*please subscribe[\s.!,]*$/i,
+          /^\s*subscribe to (my|the) channel[\s.!,]*$/i,
+          /^\s*bye[\s.!,]*$/i,
+          /^\s*you[\s.!,]*$/i,
+          /^\s*subtitles by[\s.!,]*$/i,
+          /^\s*\[.*\]\s*$/i,
+          /^\s*\(.*\)\s*$/i
+        ];
+
+        if (!transcribedText || HALLUCINATIONS.some(rx => rx.test(transcribedText))) {
+          if (url.searchParams.get('debug') === '1') {
+            return new Response(JSON.stringify({ step: 'transcribe', text: transcribedText, bufferLen: audioBuffer.byteLength, contentType: reqContentType }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+          return new Response(null, { status: 204 });
+        }
+
+        // 2. Translate Text (Groq LPU Tier-1 ~250ms or OpenRouter)
+        const langNames = {
+          en: 'English', fr: 'French', ar: 'Arabic', es: 'Spanish',
+          de: 'German', ja: 'Japanese', zh: 'Chinese', ko: 'Korean',
+          ru: 'Russian', it: 'Italian', pt: 'Portuguese', hi: 'Hindi',
+          tr: 'Turkish', nl: 'Dutch', pl: 'Polish', id: 'Indonesian', vi: 'Vietnamese'
+        };
+        const srcName = langNames[srcLang] || srcLang;
+        const tgtName = langNames[targetLang] || targetLang;
+
+        let translatedText = '';
+        if (srcLang === targetLang) {
+          translatedText = transcribedText;
+        } else if (env.GROQ_API_KEY) {
+          try {
+            const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${env.GROQ_API_KEY}`,
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+              },
+              body: JSON.stringify({
+                model: 'qwen/qwen3.8-27b',
+                messages: [
+                  {
+                    role: 'system',
+                    content: `You are an ultra-fast speech dubbing translator. Translate directly from ${srcName} to ${tgtName}. Output ONLY the translated speech. Never provide explanations, alternatives, or quotes.`
+                  },
+                  { role: 'user', content: transcribedText }
+                ],
+                temperature: 0.1,
+                max_tokens: 150
+              })
+            });
+            if (groqRes.ok) {
+              const groqData = await groqRes.json();
+              const content = groqData.choices?.[0]?.message?.content?.trim();
+              if (content) translatedText = content.replace(/^["']|["']$/g, '').trim();
+            } else {
+              const errBody = await groqRes.text();
+              console.warn('Groq error status in /api/dub:', groqRes.status, errBody);
+            }
+          } catch (groqErr) {
+            console.warn('Groq translate error in /api/dub:', groqErr);
+          }
+        }
+
+        if (!translatedText && env.OPENROUTER_API_KEY && srcLang !== targetLang) {
+          try {
+            const orRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                model: 'meta-llama/llama-3.3-70b-instruct:free',
+                messages: [
+                  {
+                    role: 'system',
+                    content: `Translate directly from ${srcName} to ${tgtName}. Output ONLY the translated speech.`
+                  },
+                  { role: 'user', content: transcribedText }
+                ],
+                temperature: 0.1,
+                max_tokens: 150
+              })
+            });
+            if (orRes.ok) {
+              const orData = await orRes.json();
+              const content = orData.choices?.[0]?.message?.content?.trim();
+              if (content) translatedText = content.replace(/^["']|["']$/g, '').trim();
+            }
+          } catch (orErr) {
+            console.warn('OpenRouter translate error in /api/dub:', orErr);
+          }
+        }
+
+        if (!translatedText || !translatedText.trim()) {
+          if (url.searchParams.get('debug') === '1') {
+            return new Response(JSON.stringify({ step: 'translate', original: transcribedText }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+          return new Response(null, { status: 204 });
+        }
+
+        // 3. Synthesize Speech (Mistral Voxtral for FR/EN or Deepgram Aura-2)
+        let audioBlob = null;
+        let contentType = 'audio/mpeg';
+
+        if (engine === 'mistral' && (targetLang === 'fr' || targetLang === 'en') && env.MISTRAL_API_KEY) {
+          try {
+            const mistralVoice = voice || (targetLang === 'fr' ? 'fr_marie_happy' : 'en_paul_happy');
+            const mistralRes = await fetch('https://api.mistral.ai/v1/audio/speech', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${env.MISTRAL_API_KEY}`,
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+              },
+              body: JSON.stringify({
+                model: 'voxtral-mini-tts-latest',
+                voice: mistralVoice,
+                input: translatedText.trim()
+              })
+            });
+            if (mistralRes.ok) {
+              audioBlob = await mistralRes.arrayBuffer();
+            }
+          } catch (mErr) {
+            console.warn('Mistral TTS error in /api/dub:', mErr);
+          }
+        }
+
+        if (!audioBlob && env.DEEPGRAM_API_KEY) {
+          try {
+            const voiceMap = {
+              fr: 'aura-2-agathe-fr',
+              de: 'aura-2-julius-de',
+              es: 'aura-2-alvaro-es',
+              ja: 'aura-2-ama-ja',
+              it: 'aura-2-elio-it',
+              nl: 'aura-2-lars-nl',
+              en: 'aura-2-thalia-en'
+            };
+            const dgVoice = voice || voiceMap[targetLang] || 'aura-2-thalia-en';
+            const dgRes = await fetch(`https://api.deepgram.com/v1/speak?model=${encodeURIComponent(dgVoice)}`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Token ${env.DEEPGRAM_API_KEY}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({ text: translatedText.trim() })
+            });
+            if (dgRes.ok) {
+              audioBlob = await dgRes.arrayBuffer();
+            }
+          } catch (dgErr) {
+            console.warn('Deepgram TTS error in /api/dub:', dgErr);
+          }
+        }
+
+        if (!audioBlob) {
+          if (url.searchParams.get('debug') === '1') {
+            return new Response(JSON.stringify({ step: 'tts', original: transcribedText, translated: translatedText, engine, targetLang, mistralKeySet: !!env.MISTRAL_API_KEY }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+          return new Response(null, { status: 204 });
+        }
+
+        return new Response(audioBlob, {
+          status: 200,
+          headers: {
+            'Content-Type': contentType,
+            'X-Original-Text': encodeURIComponent(transcribedText),
+            'X-Translated-Text': encodeURIComponent(translatedText),
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Expose-Headers': 'X-Original-Text, X-Translated-Text',
+            'Cache-Control': 'no-cache'
+          }
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+        });
+      }
+    }
+
     // Deepgram Ultra-Fast TTS Endpoint (Aura-2 French, German, Spanish, English, etc.)
     if (url.pathname === '/api/deepgram/tts') {
       try {

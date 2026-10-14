@@ -481,6 +481,11 @@
         }
         silenceFrames = 0;
         activeSpeechSamples.push(new Float32Array(input));
+
+        // Cut chunk immediately if max phrase duration reached even during loud continuous audio
+        if (activeSpeechSamples.length >= MAX_FRAMES_PER_CHUNK) {
+          dispatchDigitalAudioChunk(false);
+        }
       } else if (isSpeechActive) {
         activeSpeechSamples.push(new Float32Array(input));
         silenceFrames++;
@@ -551,6 +556,11 @@
         }
         nativeSilenceFrames = 0;
         activeNativeSamples.push(float32);
+
+        // Cut chunk immediately if max speech frames reached even during continuous audio!
+        if (activeNativeSamples.length >= NATIVE_MAX_FRAMES) {
+          dispatchDigitalAudioChunk(true);
+        }
       } else if (isNativeSpeechActive) {
         activeNativeSamples.push(float32);
         nativeSilenceFrames++;
@@ -570,35 +580,11 @@
   }
 
   async function dispatchDigitalAudioChunk(isNative = false) {
-    const samplesArray = isNative ? activeNativeSamples : activeSpeechSamples;
-    if (samplesArray.length === 0 || isTranscribingChunk) return;
+    const rawChunks = isNative ? activeNativeSamples : activeSpeechSamples;
+    if (rawChunks.length === 0) return;
 
-    let totalLength = 0;
-    for (const chunk of samplesArray) totalLength += chunk.length;
-
-    const sourceRate = isNative ? 16000 : (state.audioCtx ? state.audioCtx.sampleRate : 48000);
-
-    // Skip very brief acoustic noise (< 0.2s)
-    if (totalLength < sourceRate * 0.2) {
-      if (isNative) {
-        activeNativeSamples = [];
-        isNativeSpeechActive = false;
-        nativeSilenceFrames = 0;
-      } else {
-        activeSpeechSamples = [];
-        isSpeechActive = false;
-        silenceFrames = 0;
-      }
-      return;
-    }
-
-    const merged = new Float32Array(totalLength);
-    let offset = 0;
-    for (const chunk of samplesArray) {
-      merged.set(chunk, offset);
-      offset += chunk.length;
-    }
-
+    // Snapshot and CLEAR accumulator immediately so new incoming frames never accumulate into a giant buffer
+    const samplesArray = [...rawChunks];
     if (isNative) {
       activeNativeSamples = [];
       isNativeSpeechActive = false;
@@ -607,6 +593,25 @@
       activeSpeechSamples = [];
       isSpeechActive = false;
       silenceFrames = 0;
+    }
+
+    if (isTranscribingChunk) return;
+
+    let totalLength = 0;
+    for (const chunk of samplesArray) totalLength += chunk.length;
+
+    const sourceRate = isNative ? 16000 : (state.audioCtx ? state.audioCtx.sampleRate : 48000);
+
+    // Skip very brief acoustic noise (< 0.2s)
+    if (totalLength < sourceRate * 0.2) {
+      return;
+    }
+
+    const merged = new Float32Array(totalLength);
+    let offset = 0;
+    for (const chunk of samplesArray) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
     }
 
     // STRICT VAD ENERGY CHECK: Compute overall RMS energy of the merged buffer
@@ -933,14 +938,26 @@
       if (isScreen) {
         // If running inside Capacitor Native Android APK
         if (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform() && window.Capacitor.Plugins && window.Capacitor.Plugins.AudioCapture) {
-          showToast('Requesting Android internal screen audio capture...', 'info', 3000);
-          await window.Capacitor.Plugins.AudioCapture.startScreenCapture();
-          showToast('Direct internal YouTube audio connected via Android Service!', 'success');
-          window.Capacitor.Plugins.AudioCapture.addListener('audioChunk', (event) => {
-            if (event && event.data && state.isDubbing) {
-              handleNativePcmChunk(event.data);
+          showToast('Starting Android internal background dubbing engine...', 'info', 3000);
+          const captureOpts = {
+            srcLang: state.srcLang || 'en',
+            targetLang: state.targetLang || 'fr',
+            voice: state.mistralVoice || 'fr_marie_happy',
+            engine: state.ttsEngine || 'mistral'
+          };
+          await window.Capacitor.Plugins.AudioCapture.startScreenCapture(captureOpts);
+          showToast('Background Dubber active! You can now switch to YouTube.', 'success', 5000);
+
+          // Native Android Service sends live transcription & translation results
+          window.Capacitor.Plugins.AudioCapture.addListener('dubResult', (event) => {
+            if (event && event.original && event.translated && state.isDubbing) {
+              elements.liveOriginalTranscript.textContent = event.original;
+              elements.liveDubbedTranscript.textContent = event.translated;
+              updateTicker(`"${event.translated.slice(-35)}"`, 'listening');
+              logTranscript(new Date().toLocaleTimeString(), event.original, event.translated);
             }
           });
+
           return null;
         }
 
