@@ -56,10 +56,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cp android/app/build/outputs/apk/debug/app-debug.apk Dubber.apk
-          gh release create v1.3.6 Dubber.apk \
-            --title "Dubber Android v1.3.6" \
-            --notes "Dubber v1.3.6: FileDescriptor cache playback bypass, USAGE_MEDIA output routing, native Android TextToSpeech fallback engine, Deepgram multi-lingual voice model selection fix, and liveTranslatedTranscript UI display fix." \
-            || gh release upload v1.3.6 Dubber.apk --clobber
+          gh release create v1.3.7 Dubber.apk \
+            --title "Dubber Android v1.3.7" \
+            --notes "Dubber v1.3.7: Gapless Parallel Prefetching Pipeline (0ms dead air between sentences), Adaptive Launchpad VAD Chunking (1.0s fast TTFA), Auto-Catchup Playback Speed (1.15x), Permanent Keystore signing (enables direct in-place APK updates without conflicting package errors), and English to French default with Mistral Voxtral." \
+            || gh release upload v1.3.7 Dubber.apk --clobber
+          gh release upload v1.3.6 Dubber.apk --clobber || true
           gh release upload v1.3.5 Dubber.apk --clobber || true
           gh release upload v1.3.4 Dubber.apk --clobber || true
           gh release upload v1.3.3 Dubber.apk --clobber || true

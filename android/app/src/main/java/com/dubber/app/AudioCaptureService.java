@@ -36,7 +36,9 @@ import java.net.URLEncoder;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class AudioCaptureService extends Service {
     private static final String TAG = "DubberAudioService";
@@ -71,14 +73,43 @@ public class AudioCaptureService extends Service {
     private boolean isRecording = false;
     private Handler mainHandler;
 
-    // Background Execution Engine
-    private ExecutorService dubExecutor;
+    // Background Parallel Fetch + Sequential Gapless Playback Engine
+    private ExecutorService networkExecutor;
+    private ExecutorService playbackExecutor;
+    private final PriorityBlockingQueue<DubQueueItem> playQueue = new PriorityBlockingQueue<>();
+    private final AtomicLong chunkSequence = new AtomicLong(0);
+    private volatile long nextPlaySequence = 0;
+    private volatile boolean isPipelineActive = false;
+
+    private static class DubQueueItem implements Comparable<DubQueueItem> {
+        final long sequenceId;
+        final File audioFile;
+        final String origText;
+        final String transText;
+        final boolean isTombstone;
+        final long timestampMs;
+
+        DubQueueItem(long sequenceId, File audioFile, String origText, String transText, boolean isTombstone) {
+            this.sequenceId = sequenceId;
+            this.audioFile = audioFile;
+            this.origText = origText;
+            this.transText = transText;
+            this.isTombstone = isTombstone;
+            this.timestampMs = System.currentTimeMillis();
+        }
+
+        @Override
+        public int compareTo(DubQueueItem o) {
+            return Long.compare(this.sequenceId, o.sequenceId);
+        }
+    }
+
     private MediaPlayer mediaPlayer;
     private android.speech.tts.TextToSpeech systemTts;
     private volatile boolean isPlayingDubbedAudio = false;
     private AudioFocusRequest nativeAudioFocusRequest = null;
 
-    // Dubbing pipeline settings
+    // Dubbing pipeline settings (French default)
     private String srcLang = "en";
     private String targetLang = "fr";
     private String voice = "fr_marie_happy";
@@ -278,7 +309,14 @@ public class AudioCaptureService extends Service {
             }
 
             audioRecord = record;
-            dubExecutor = Executors.newSingleThreadExecutor();
+            networkExecutor = Executors.newFixedThreadPool(2);
+            playbackExecutor = Executors.newSingleThreadExecutor();
+            playQueue.clear();
+            chunkSequence.set(0);
+            nextPlaySequence = 0;
+            isPipelineActive = true;
+            startPlaybackLoop();
+
             audioRecord.startRecording();
             isRecording = true;
 
@@ -292,11 +330,13 @@ public class AudioCaptureService extends Service {
                 boolean isSpeechActive = false;
                 int silenceFrames = 0;
 
-                // Native VAD thresholds: calibrated for 16kHz 16-bit Mono PCM
+                // Native VAD thresholds with Launchpad Chunking for instant TTFA
                 final int SPEECH_THRESHOLD_RMS = 160;
-                final int SILENCE_FRAMES_TRIGGER = 3;    // ~350ms pause
-                final int MAX_SPEECH_BYTES = 80000;      // ~2.5s max phrase chunk (natural sentences)
-                final int MIN_SPEECH_BYTES = 9600;       // ~0.3s min phrase chunk
+                final int SILENCE_FRAMES_TRIGGER = 2;       // ~220ms pause -> instant phrase/breath cut!
+                final int FIRST_CHUNK_BYTES = 32000;        // ~1.0s launchpad chunk (cuts first phrase latency in half!)
+                final int CONTINUOUS_CHUNK_BYTES = 56000;   // ~1.75s continuous chunk
+                final int MIN_SPEECH_BYTES = 9600;          // ~0.3s min phrase chunk
+                boolean isFirstChunkOfUtterance = true;
 
                 while (isRecording && audioRecord != null) {
                     try {
@@ -370,28 +410,32 @@ public class AudioCaptureService extends Service {
                         // 4. Compute RMS energy across the 16kHz window
                         double rms = Math.sqrt((double) sum / samples16k.length);
 
+                        int maxBytesForCurrentChunk = isFirstChunkOfUtterance ? FIRST_CHUNK_BYTES : CONTINUOUS_CHUNK_BYTES;
+
                         if (rms >= SPEECH_THRESHOLD_RMS) {
                             if (!isSpeechActive) {
                                 isSpeechActive = true;
+                                isFirstChunkOfUtterance = true;
                                 speechBuffer.reset();
                             }
                             silenceFrames = 0;
                             speechBuffer.write(pcm16k, 0, pcm16k.length);
 
                             // Forced cut: dispatch when phrase buffer hits max length
-                            if (speechBuffer.size() >= MAX_SPEECH_BYTES) {
+                            if (speechBuffer.size() >= maxBytesForCurrentChunk) {
                                 byte[] chunk = speechBuffer.toByteArray();
                                 speechBuffer.reset();
-                                isSpeechActive = false;
+                                isFirstChunkOfUtterance = false;
                                 dispatchToEdgeDubber(chunk);
                             }
                         } else if (isSpeechActive) {
                             speechBuffer.write(pcm16k, 0, pcm16k.length);
                             silenceFrames++;
 
-                            if (silenceFrames >= SILENCE_FRAMES_TRIGGER || speechBuffer.size() >= MAX_SPEECH_BYTES) {
+                            if (silenceFrames >= SILENCE_FRAMES_TRIGGER || speechBuffer.size() >= maxBytesForCurrentChunk) {
                                 if (speechBuffer.size() >= MIN_SPEECH_BYTES) {
                                     byte[] chunk = speechBuffer.toByteArray();
+                                    isFirstChunkOfUtterance = false;
                                     dispatchToEdgeDubber(chunk);
                                 }
                                 speechBuffer.reset();
@@ -413,9 +457,11 @@ public class AudioCaptureService extends Service {
     }
 
     private void dispatchToEdgeDubber(byte[] pcmData) {
-        if (dubExecutor == null || dubExecutor.isShutdown()) return;
+        if (networkExecutor == null || networkExecutor.isShutdown()) return;
 
-        dubExecutor.submit(() -> {
+        final long seq = chunkSequence.getAndIncrement();
+
+        networkExecutor.submit(() -> {
             HttpURLConnection conn = null;
             try {
                 byte[] wavBytes = buildWavBytes(pcmData, 16000, 1, 16);
@@ -429,7 +475,7 @@ public class AudioCaptureService extends Service {
                 conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("POST");
                 conn.setRequestProperty("Content-Type", "audio/wav");
-                conn.setRequestProperty("User-Agent", "Dubber/1.3.5 (Android Mobile)");
+                conn.setRequestProperty("User-Agent", "Dubber/1.3.7 (Android Mobile)");
                 conn.setDoOutput(true);
                 conn.setConnectTimeout(4000);
                 conn.setReadTimeout(12000);
@@ -441,6 +487,7 @@ public class AudioCaptureService extends Service {
 
                 int respCode = conn.getResponseCode();
                 if (respCode == 204 || respCode != 200) {
+                    playQueue.add(new DubQueueItem(seq, null, "", "", true));
                     return;
                 }
 
@@ -450,7 +497,7 @@ public class AudioCaptureService extends Service {
                 String transText = transHeader != null ? URLDecoder.decode(transHeader, "UTF-8") : "";
 
                 // Write MP3 audio to temporary cache file
-                File cacheFile = File.createTempFile("dub_", ".mp3", getCacheDir());
+                File cacheFile = File.createTempFile("dub_" + seq + "_", ".mp3", getCacheDir());
                 try (InputStream is = conn.getInputStream(); FileOutputStream fos = new FileOutputStream(cacheFile)) {
                     byte[] tempBuf = new byte[4096];
                     int n;
@@ -459,31 +506,87 @@ public class AudioCaptureService extends Service {
                     }
                 }
 
-                // Play the translated speech with native system audio focus ducking!
-                playDubbedAudioFile(cacheFile, origText, transText);
+                playQueue.add(new DubQueueItem(seq, cacheFile, origText, transText, false));
 
             } catch (Throwable t) {
-                Log.e(TAG, "Native dubbing dispatch error: " + t.getMessage(), t);
+                Log.e(TAG, "Native dubbing network error (seq=" + seq + "): " + t.getMessage());
+                playQueue.add(new DubQueueItem(seq, null, "", "", true));
             } finally {
                 if (conn != null) conn.disconnect();
             }
         });
     }
 
-    private void playDubbedAudioFile(File audioFile, String origText, String transText) {
+    private void startPlaybackLoop() {
+        if (playbackExecutor == null || playbackExecutor.isShutdown()) return;
+
+        playbackExecutor.submit(() -> {
+            Log.i(TAG, "Gapless ordered playback loop started");
+            while (isPipelineActive && !Thread.currentThread().isInterrupted()) {
+                try {
+                    DubQueueItem item = playQueue.poll(150, TimeUnit.MILLISECONDS);
+                    if (item == null) continue;
+
+                    // Future sequence arrived before expected sequence
+                    if (item.sequenceId > nextPlaySequence) {
+                        playQueue.add(item);
+                        Thread.sleep(60);
+                        if (System.currentTimeMillis() - item.timestampMs > 2500) {
+                            Log.w(TAG, "Advancing nextPlaySequence from " + nextPlaySequence + " to " + item.sequenceId + " to prevent stall");
+                            nextPlaySequence = item.sequenceId;
+                        }
+                        continue;
+                    }
+
+                    if (item.sequenceId < nextPlaySequence) {
+                        if (item.audioFile != null) {
+                            try { item.audioFile.delete(); } catch (Throwable ignored) {}
+                        }
+                        continue;
+                    }
+
+                    nextPlaySequence++;
+
+                    if (item.isTombstone) {
+                        continue;
+                    }
+
+                    if (System.currentTimeMillis() - item.timestampMs > 15000) {
+                        Log.w(TAG, "Dropping stale dub chunk (seq=" + item.sequenceId + ") to prevent desync");
+                        if (item.audioFile != null) {
+                            try { item.audioFile.delete(); } catch (Throwable ignored) {}
+                        }
+                        continue;
+                    }
+
+                    playAudioItemSynchronous(item);
+
+                } catch (InterruptedException ie) {
+                    break;
+                } catch (Throwable t) {
+                    Log.e(TAG, "Error in playback loop: " + t.getMessage(), t);
+                }
+            }
+            Log.i(TAG, "Gapless ordered playback loop finished");
+        });
+    }
+
+    private void playAudioItemSynchronous(DubQueueItem item) {
         try {
             requestNativeDuck();
             isPlayingDubbedAudio = true;
 
             if (sDubResultListener != null) {
-                sDubResultListener.onDubResult(origText, transText);
+                sDubResultListener.onDubResult(item.origText, item.transText);
             }
 
-            CountDownLatch latch = new CountDownLatch(1);
+            final CountDownLatch latch = new CountDownLatch(1);
+            final int queuedAhead = playQueue.size();
+
             mainHandler.post(() -> {
                 boolean playedWithMediaPlayer = false;
                 try {
-                    if (audioFile != null && audioFile.exists() && audioFile.length() > 500) {
+                    if (item.audioFile != null && item.audioFile.exists() && item.audioFile.length() > 500) {
                         if (mediaPlayer != null) {
                             try { mediaPlayer.stop(); mediaPlayer.release(); } catch (Throwable ignored) {}
                             mediaPlayer = null;
@@ -495,23 +598,36 @@ public class AudioCaptureService extends Service {
                             .build());
                         mediaPlayer.setVolume(1.0f, 1.0f);
 
-                        // Use FileInputStream FileDescriptor to bypass SELinux access blocks on cache dir
-                        try (java.io.FileInputStream fis = new java.io.FileInputStream(audioFile)) {
+                        try (java.io.FileInputStream fis = new java.io.FileInputStream(item.audioFile)) {
                             mediaPlayer.setDataSource(fis.getFD());
                         }
 
+                        // Auto-catchup: if multiple items are waiting, speak at 1.15x speed to stay in real-time sync
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            try {
+                                float speed = queuedAhead > 1 ? 1.15f : 1.0f;
+                                android.media.PlaybackParams params = mediaPlayer.getPlaybackParams();
+                                params.setSpeed(speed);
+                                mediaPlayer.setPlaybackParams(params);
+                            } catch (Throwable ignored) {}
+                        }
+
                         mediaPlayer.setOnCompletionListener(mp -> {
-                            abandonNativeDuck();
-                            isPlayingDubbedAudio = false;
-                            try { audioFile.delete(); } catch (Throwable ignored) {}
+                            if (playQueue.isEmpty()) {
+                                abandonNativeDuck();
+                                isPlayingDubbedAudio = false;
+                            }
+                            try { item.audioFile.delete(); } catch (Throwable ignored) {}
                             latch.countDown();
                         });
+
                         mediaPlayer.setOnErrorListener((mp, what, extra) -> {
                             Log.w(TAG, "MediaPlayer playback error (" + what + ", " + extra + "), falling back to System TTS");
-                            playSystemTts(transText, latch);
-                            try { audioFile.delete(); } catch (Throwable ignored) {}
+                            playSystemTts(item.transText, latch);
+                            try { item.audioFile.delete(); } catch (Throwable ignored) {}
                             return true;
                         });
+
                         mediaPlayer.prepare();
                         mediaPlayer.start();
                         playedWithMediaPlayer = true;
@@ -521,21 +637,21 @@ public class AudioCaptureService extends Service {
                 }
 
                 if (!playedWithMediaPlayer) {
-                    // Fallback to Native System TextToSpeech (always works offline & through media audio stream)
-                    playSystemTts(transText, latch);
-                    if (audioFile != null) {
-                        try { audioFile.delete(); } catch (Throwable ignored) {}
+                    playSystemTts(item.transText, latch);
+                    if (item.audioFile != null) {
+                        try { item.audioFile.delete(); } catch (Throwable ignored) {}
                     }
                 }
             });
 
-            // Sequential pacing: wait until audio finishes speaking before processing next chunk
             latch.await(15, TimeUnit.SECONDS);
 
         } catch (Throwable t) {
-            Log.e(TAG, "playDubbedAudioFile error: " + t.getMessage(), t);
-            abandonNativeDuck();
-            isPlayingDubbedAudio = false;
+            Log.e(TAG, "playAudioItemSynchronous error: " + t.getMessage(), t);
+            if (playQueue.isEmpty()) {
+                abandonNativeDuck();
+                isPlayingDubbedAudio = false;
+            }
         }
     }
 
@@ -547,27 +663,35 @@ public class AudioCaptureService extends Service {
                     @Override public void onStart(String utteranceId) {}
                     @Override
                     public void onDone(String utteranceId) {
-                        abandonNativeDuck();
-                        isPlayingDubbedAudio = false;
+                        if (playQueue.isEmpty()) {
+                            abandonNativeDuck();
+                            isPlayingDubbedAudio = false;
+                        }
                         if (latch != null) latch.countDown();
                     }
                     @Override
                     public void onError(String utteranceId) {
-                        abandonNativeDuck();
-                        isPlayingDubbedAudio = false;
+                        if (playQueue.isEmpty()) {
+                            abandonNativeDuck();
+                            isPlayingDubbedAudio = false;
+                        }
                         if (latch != null) latch.countDown();
                     }
                 });
                 systemTts.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "dub_phrase_" + System.currentTimeMillis());
             } else {
-                abandonNativeDuck();
-                isPlayingDubbedAudio = false;
+                if (playQueue.isEmpty()) {
+                    abandonNativeDuck();
+                    isPlayingDubbedAudio = false;
+                }
                 if (latch != null) latch.countDown();
             }
         } catch (Throwable t) {
             Log.e(TAG, "playSystemTts error: " + t.getMessage());
-            abandonNativeDuck();
-            isPlayingDubbedAudio = false;
+            if (playQueue.isEmpty()) {
+                abandonNativeDuck();
+                isPlayingDubbedAudio = false;
+            }
             if (latch != null) latch.countDown();
         }
     }
@@ -649,10 +773,22 @@ public class AudioCaptureService extends Service {
 
     private void stopAudioCapture() {
         isRecording = false;
-        if (dubExecutor != null) {
-            try { dubExecutor.shutdownNow(); } catch (Throwable ignored) {}
-            dubExecutor = null;
+        isPipelineActive = false;
+        if (networkExecutor != null) {
+            try { networkExecutor.shutdownNow(); } catch (Throwable ignored) {}
+            networkExecutor = null;
         }
+        if (playbackExecutor != null) {
+            try { playbackExecutor.shutdownNow(); } catch (Throwable ignored) {}
+            playbackExecutor = null;
+        }
+        for (DubQueueItem item : playQueue) {
+            if (item.audioFile != null) {
+                try { item.audioFile.delete(); } catch (Throwable ignored) {}
+            }
+        }
+        playQueue.clear();
+
         if (mediaPlayer != null) {
             try { mediaPlayer.stop(); mediaPlayer.release(); } catch (Throwable ignored) {}
             mediaPlayer = null;

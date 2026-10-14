@@ -79,7 +79,7 @@
     
     // Languages
     srcLang: localStorage.getItem(STORAGE_KEYS.SRC_LANG) || 'en-US',
-    tgtLang: localStorage.getItem(STORAGE_KEYS.TGT_LANG) || 'es-ES',
+    tgtLang: localStorage.getItem(STORAGE_KEYS.TGT_LANG) || 'fr-FR',
 
     // Translation Engine & OpenRouter Settings
     apiKey: localStorage.getItem(STORAGE_KEYS.API_KEY) || '',
@@ -2341,7 +2341,7 @@
     elements.resetDefaultsBtn.addEventListener('click', () => {
       elements.sourceDisplayRadio.checked = true;
       elements.srcLangSelect.value = 'en-US';
-      elements.tgtLangSelect.value = 'es-ES';
+      elements.tgtLangSelect.value = 'fr-FR';
       elements.modelSelect.value = 'groq-server';
       elements.ttsEngineSelect.value = 'mistral';
       if (elements.mistralVoiceSelect) elements.mistralVoiceSelect.value = 'fr_marie_happy';

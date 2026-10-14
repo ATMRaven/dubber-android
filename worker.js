@@ -51,8 +51,9 @@ export default {
 
         const reqContentType = request.headers.get('Content-Type') || 'audio/wav';
 
-        // 1. Transcribe Audio (Deepgram Nova-2 <180ms or Cloudflare Whisper fallback)
+        // 1. Transcribe Audio (Deepgram Nova-2 <200ms or Groq / Cloudflare fallback)
         let transcribedText = '';
+        let deepgramEvaluated = false;
         if (env.DEEPGRAM_API_KEY) {
           try {
             const dgRes = await fetch(`https://api.deepgram.com/v1/listen?model=nova-2&language=${srcLang}&smart_format=true`, {
@@ -64,6 +65,7 @@ export default {
               body: audioBuffer
             });
             if (dgRes.ok) {
+              deepgramEvaluated = true;
               const dgData = await dgRes.json();
               transcribedText = dgData.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim() || '';
             }
@@ -72,15 +74,26 @@ export default {
           }
         }
 
-        if (!transcribedText && env.AI) {
+        // Fast Groq Whisper fallback if Deepgram had a network failure
+        if (!transcribedText && !deepgramEvaluated && env.GROQ_API_KEY) {
           try {
-            const audioArray = [...new Uint8Array(audioBuffer)];
-            const aiResponse = await env.AI.run('@cf/openai/whisper', { audio: audioArray });
-            if (aiResponse && aiResponse.text) {
-              transcribedText = aiResponse.text.trim();
+            const formData = new FormData();
+            formData.append('file', new Blob([audioBuffer], { type: 'audio/wav' }), 'audio.wav');
+            formData.append('model', 'whisper-large-v3-turbo');
+            formData.append('language', srcLang);
+            formData.append('temperature', '0.0');
+
+            const groqSttRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${env.GROQ_API_KEY}` },
+              body: formData
+            });
+            if (groqSttRes.ok) {
+              const groqSttData = await groqSttRes.json();
+              transcribedText = groqSttData.text?.trim() || '';
             }
-          } catch (aiErr) {
-            console.warn('Whisper fallback error in /api/dub:', aiErr);
+          } catch (groqSttErr) {
+            console.warn('Groq Whisper fallback error in /api/dub:', groqSttErr);
           }
         }
 
