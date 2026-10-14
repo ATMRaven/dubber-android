@@ -43,6 +43,12 @@
 
   --transition-fast: 150ms cubic-bezier(0.16, 1, 0.3, 1);
   --transition-smooth: 220ms cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Mobile Safe Area Insets for Status Bar, Notch & Navigation */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
 }
 
 /* Light Mode Overrides if user system prefers or toggles */
@@ -1199,11 +1205,16 @@ body {
 
 /* ==========================================================================
 /* ==========================================================================
-   6. RESPONSIVE BREAKPOINTS (Mobile-First Polish)
+   6. RESPONSIVE BREAKPOINTS (Mobile Polish & Safe Area Support)
    ========================================================================== */
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   body {
-    padding-bottom: 96px;
+    padding-top: max(var(--safe-top), 24px) !important;
+    padding-bottom: max(calc(var(--safe-bottom) + 96px), 110px) !important;
+  }
+
+  .app-layout {
+    padding: 8px 14px !important;
   }
 
   .brand-sub {
@@ -1211,34 +1222,44 @@ body {
   }
 
   .app-header {
-    padding: 8px 12px !important;
+    margin-top: max(var(--safe-top), 6px) !important;
+    padding: 10px 14px !important;
     gap: 8px !important;
     flex-wrap: wrap !important;
   }
 
   .brand h1 {
-    font-size: 15px !important;
+    font-size: 16px !important;
   }
 
+  /* Remove bulky desktop video test bench on mobile for minimalist, clutter-free UX */
+  .playground-card {
+    display: none !important;
+  }
+
+  /* Safe Area Aware Floating Controller Pill */
   .floating-pill {
     top: auto !important;
-    bottom: 12px !important;
+    bottom: max(calc(var(--safe-bottom) + 14px), 24px) !important;
     right: 12px !important;
     left: 12px !important;
     width: calc(100% - 24px) !important;
     max-width: calc(100% - 24px) !important;
     box-sizing: border-box !important;
-    padding: 6px 8px !important;
-    gap: 6px !important;
+    padding: 8px 12px !important;
+    gap: 8px !important;
     display: flex !important;
     align-items: center !important;
     justify-content: space-between !important;
     overflow: hidden !important;
     border-radius: var(--radius-full) !important;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.75) !important;
+    background: rgba(24, 24, 27, 0.95) !important;
+    backdrop-filter: blur(16px) !important;
+    border: 1px solid var(--border-medium) !important;
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.85) !important;
   }
 
-  /* Hide bulky desktop drag grip & meters on mobile */
+  /* Hide desktop drag grip & meters on mobile */
   .pill-grip {
     display: none !important;
   }
@@ -1258,15 +1279,16 @@ body {
   }
 
   .pill-btn-primary {
-    height: 34px !important;
-    padding: 0 10px !important;
-    font-size: 12px !important;
+    height: 36px !important;
+    padding: 0 12px !important;
+    font-size: 13px !important;
+    font-weight: 600 !important;
     flex-shrink: 0 !important;
   }
 
   .pill-lang-badge {
-    padding: 3px 6px !important;
-    font-size: 10px !important;
+    padding: 4px 8px !important;
+    font-size: 11px !important;
     flex-shrink: 0 !important;
   }
 
@@ -1277,9 +1299,9 @@ body {
     overflow: hidden !important;
     text-overflow: ellipsis !important;
     white-space: nowrap !important;
-    font-size: 11px !important;
-    padding: 3px 6px !important;
-    background: rgba(0, 0, 0, 0.4) !important;
+    font-size: 12px !important;
+    padding: 4px 8px !important;
+    background: rgba(0, 0, 0, 0.45) !important;
     border-radius: var(--radius-sm) !important;
     border-left: none !important;
   }
@@ -1294,16 +1316,24 @@ body {
 
   #openDrawerBtn {
     flex-shrink: 0 !important;
-    width: 32px !important;
-    height: 32px !important;
+    width: 36px !important;
+    height: 36px !important;
   }
 
   .drawer {
-    width: 100vw;
+    width: 100vw !important;
+  }
+
+  .drawer-header {
+    padding-top: max(calc(var(--safe-top) + 16px), 20px) !important;
+  }
+
+  .drawer-body {
+    padding-bottom: max(calc(var(--safe-bottom) + 32px), 40px) !important;
   }
 
   .grid-2col, .slider-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr !important;
   }
 }
 

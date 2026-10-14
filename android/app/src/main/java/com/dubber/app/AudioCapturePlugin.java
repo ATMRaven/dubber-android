@@ -4,6 +4,9 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.util.Base64;
@@ -34,6 +37,7 @@ import com.getcapacitor.annotation.PermissionCallback;
 )
 public class AudioCapturePlugin extends Plugin {
     private static final String TAG = "AudioCapturePlugin";
+    private AudioFocusRequest audioFocusRequest = null;
 
     @PluginMethod
     public void isSupported(PluginCall call) {
@@ -41,6 +45,70 @@ public class AudioCapturePlugin extends Plugin {
         ret.put("supported", Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q);
         ret.put("apiLevel", Build.VERSION.SDK_INT);
         call.resolve(ret);
+    }
+
+    /**
+     * Request system-level audio ducking on Android.
+     * Tells external apps (like YouTube, Spotify, video players) to smoothly lower their volume.
+     */
+    @PluginMethod
+    public void requestDuck(PluginCall call) {
+        try {
+            AudioManager audioManager = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+            if (audioManager == null) {
+                call.reject("AudioManager not available");
+                return;
+            }
+
+            int result;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (audioFocusRequest == null) {
+                    AudioAttributes playbackAttributes = new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build();
+
+                    audioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                        .setAudioAttributes(playbackAttributes)
+                        .setAcceptsDelayedFocusGain(false)
+                        .setWillPauseWhenDucked(false)
+                        .build();
+                }
+                result = audioManager.requestAudioFocus(audioFocusRequest);
+            } else {
+                result = audioManager.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK);
+            }
+
+            JSObject ret = new JSObject();
+            ret.put("ducked", result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED);
+            call.resolve(ret);
+        } catch (Throwable t) {
+            Log.e(TAG, "Error in requestDuck: " + t.getMessage(), t);
+            call.reject("requestDuck failed: " + t.getMessage());
+        }
+    }
+
+    /**
+     * Abandon system-level audio focus, restoring external apps to full 100% volume.
+     */
+    @PluginMethod
+    public void abandonDuck(PluginCall call) {
+        try {
+            AudioManager audioManager = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+            if (audioManager != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && audioFocusRequest != null) {
+                    audioManager.abandonAudioFocusRequest(audioFocusRequest);
+                } else {
+                    audioManager.abandonAudioFocus(null);
+                }
+            }
+            JSObject ret = new JSObject();
+            ret.put("abandoned", true);
+            call.resolve(ret);
+        } catch (Throwable t) {
+            Log.e(TAG, "Error in abandonDuck: " + t.getMessage(), t);
+            call.reject("abandonDuck failed: " + t.getMessage());
+        }
     }
 
     @PluginMethod

@@ -259,22 +259,36 @@
   }
 
   /**
-   * Smoothly duck or restore source audio gain
+   * Smoothly duck or restore source audio gain (Supports Native Android System Ducking + Web Audio)
    */
   function applyDucking(duck) {
-    if (!state.duckingEnabled || !state.duckingGainNode || !state.audioCtx) return;
+    if (!state.duckingEnabled) return;
     state.isDucked = duck;
 
-    const ctx = state.audioCtx;
-    const now = ctx.currentTime;
-    const targetGain = duck ? (state.duckingDepth / 100) : 1.0;
-    const rampTime = duck ? 0.12 : 0.28; // Rapid duck (120ms), smooth recovery (280ms)
+    // 1. Native Android System Audio Focus Ducking (lowers YouTube, Spotify, etc.)
+    if (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform() && window.Capacitor.Plugins && window.Capacitor.Plugins.AudioCapture) {
+      try {
+        if (duck) {
+          window.Capacitor.Plugins.AudioCapture.requestDuck().catch(() => {});
+        } else {
+          window.Capacitor.Plugins.AudioCapture.abandonDuck().catch(() => {});
+        }
+      } catch (e) {}
+    }
 
-    state.duckingGainNode.gain.cancelScheduledValues(now);
-    state.duckingGainNode.gain.setValueAtTime(state.duckingGainNode.gain.value, now);
-    state.duckingGainNode.gain.linearRampToValueAtTime(targetGain, now + rampTime);
+    // 2. Web Audio API Ducking (Desktop tab or mic)
+    if (state.duckingGainNode && state.audioCtx) {
+      const ctx = state.audioCtx;
+      const now = ctx.currentTime;
+      const targetGain = duck ? (state.duckingDepth / 100) : 1.0;
+      const rampTime = duck ? 0.12 : 0.28; // Rapid duck (120ms), smooth recovery (280ms)
 
-    // Also communicate volume ducking directly to the embedded YouTube player iframe if active
+      state.duckingGainNode.gain.cancelScheduledValues(now);
+      state.duckingGainNode.gain.setValueAtTime(state.duckingGainNode.gain.value, now);
+      state.duckingGainNode.gain.linearRampToValueAtTime(targetGain, now + rampTime);
+    }
+
+    // 3. Embedded YouTube player iframe if active
     if (elements.youtubePlayer && elements.youtubePlayer.contentWindow) {
       try {
         const vol = duck ? state.duckingDepth : 100;
@@ -286,7 +300,7 @@
       } catch (e) {}
     }
 
-    // Update Pill & Stats
+    // 4. Update Pill & Stats
     if (duck) {
       const depthDesc = state.duckingDepth === 0 ? 'Muted (100% duck)' : `${state.duckingDepth}% (-${100 - state.duckingDepth}%)`;
       elements.statDuckingVal.textContent = `Ducking Active (${depthDesc})`;
@@ -502,6 +516,9 @@
 
   function handleNativePcmChunk(base64Data) {
     if (!state.isDubbing) return;
+    // Acoustic Echo Suppression: Ignore incoming audio while Dubber is actively playing speech
+    if (state.isDucked || isPipelinePlaying) return;
+
     try {
       const binaryStr = atob(base64Data);
       const len = binaryStr.length;
@@ -519,9 +536,10 @@
       }
       const rms = Math.sqrt(sum / float32.length);
 
-      const NATIVE_SPEECH_THRESHOLD = 0.008;
-      const NATIVE_SILENCE_TRIGGER = 7; // ~0.8s silence
-      const NATIVE_MAX_FRAMES = 28;     // ~3.5s max speech
+      // Fast mobile voice activity detection (VAD) thresholds
+      const NATIVE_SPEECH_THRESHOLD = 0.005; // Sensitive to mobile speech
+      const NATIVE_SILENCE_TRIGGER = 3;     // ~380ms pause -> immediate dispatch!
+      const NATIVE_MAX_FRAMES = 12;         // ~1.5s max speech chunk -> fast, natural phrases!
 
       if (rms >= NATIVE_SPEECH_THRESHOLD) {
         if (!isNativeSpeechActive) {
@@ -560,8 +578,8 @@
 
     const sourceRate = isNative ? 16000 : (state.audioCtx ? state.audioCtx.sampleRate : 48000);
 
-    // Skip very brief acoustic noise (< 0.3s)
-    if (totalLength < sourceRate * 0.3) {
+    // Skip very brief acoustic noise (< 0.2s)
+    if (totalLength < sourceRate * 0.2) {
       if (isNative) {
         activeNativeSamples = [];
         isNativeSpeechActive = false;
@@ -597,8 +615,8 @@
       energySum += merged[i] * merged[i];
     }
     const overallRms = Math.sqrt(energySum / merged.length);
-    if (overallRms < 0.0075) {
-      // Discard silence or sub-audible hiss — prevents Whisper hallucination loops completely!
+    if (overallRms < 0.004) {
+      // Discard silence or sub-audible hiss
       return;
     }
 

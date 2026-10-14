@@ -150,11 +150,15 @@ public class AudioCaptureService extends Service {
                 }
             }, mainHandler);
 
-            AudioPlaybackCaptureConfiguration config = new AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
+            AudioPlaybackCaptureConfiguration.Builder configBuilder = new AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
                 .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
                 .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-                .build();
+                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN);
+
+            // CRITICAL: Exclude Dubber's own process UID to prevent acoustic echo and feedback loops
+            configBuilder.excludeUid(android.os.Process.myUid());
+
+            AudioPlaybackCaptureConfiguration config = configBuilder.build();
 
             final int sampleRate = 16000;
             final int channelConfig = AudioFormat.CHANNEL_IN_MONO;
