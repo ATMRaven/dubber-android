@@ -74,6 +74,7 @@ public class AudioCaptureService extends Service {
     // Background Execution Engine
     private ExecutorService dubExecutor;
     private MediaPlayer mediaPlayer;
+    private android.speech.tts.TextToSpeech systemTts;
     private volatile boolean isPlayingDubbedAudio = false;
     private AudioFocusRequest nativeAudioFocusRequest = null;
 
@@ -87,6 +88,17 @@ public class AudioCaptureService extends Service {
     public void onCreate() {
         super.onCreate();
         mainHandler = new Handler(Looper.getMainLooper());
+        try {
+            systemTts = new android.speech.tts.TextToSpeech(getApplicationContext(), status -> {
+                if (status == android.speech.tts.TextToSpeech.SUCCESS && systemTts != null) {
+                    try {
+                        systemTts.setLanguage(new java.util.Locale(targetLang));
+                    } catch (Throwable ignored) {}
+                }
+            });
+        } catch (Throwable t) {
+            Log.w(TAG, "System TextToSpeech init error: " + t.getMessage());
+        }
     }
 
     @Override
@@ -105,7 +117,12 @@ public class AudioCaptureService extends Service {
                 String sLang = intent.getStringExtra("srcLang");
                 if (sLang != null && !sLang.isEmpty()) srcLang = sLang;
                 String tLang = intent.getStringExtra("targetLang");
-                if (tLang != null && !tLang.isEmpty()) targetLang = tLang;
+                if (tLang != null && !tLang.isEmpty()) {
+                    targetLang = tLang;
+                    if (systemTts != null) {
+                        try { systemTts.setLanguage(new java.util.Locale(targetLang)); } catch (Throwable ignored) {}
+                    }
+                }
                 String v = intent.getStringExtra("voice");
                 if (v != null && !v.isEmpty()) voice = v;
                 String eng = intent.getStringExtra("engine");
@@ -433,7 +450,7 @@ public class AudioCaptureService extends Service {
                 String transText = transHeader != null ? URLDecoder.decode(transHeader, "UTF-8") : "";
 
                 // Write MP3 audio to temporary cache file
-                File cacheFile = new File(getCacheDir(), "dub_current.mp3");
+                File cacheFile = File.createTempFile("dub_", ".mp3", getCacheDir());
                 try (InputStream is = conn.getInputStream(); FileOutputStream fos = new FileOutputStream(cacheFile)) {
                     byte[] tempBuf = new byte[4096];
                     int n;
@@ -464,37 +481,51 @@ public class AudioCaptureService extends Service {
 
             CountDownLatch latch = new CountDownLatch(1);
             mainHandler.post(() -> {
+                boolean playedWithMediaPlayer = false;
                 try {
-                    if (mediaPlayer != null) {
-                        try { mediaPlayer.stop(); mediaPlayer.release(); } catch (Throwable ignored) {}
-                        mediaPlayer = null;
+                    if (audioFile != null && audioFile.exists() && audioFile.length() > 500) {
+                        if (mediaPlayer != null) {
+                            try { mediaPlayer.stop(); mediaPlayer.release(); } catch (Throwable ignored) {}
+                            mediaPlayer = null;
+                        }
+                        mediaPlayer = new MediaPlayer();
+                        mediaPlayer.setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build());
+                        mediaPlayer.setVolume(1.0f, 1.0f);
+
+                        // Use FileInputStream FileDescriptor to bypass SELinux access blocks on cache dir
+                        try (java.io.FileInputStream fis = new java.io.FileInputStream(audioFile)) {
+                            mediaPlayer.setDataSource(fis.getFD());
+                        }
+
+                        mediaPlayer.setOnCompletionListener(mp -> {
+                            abandonNativeDuck();
+                            isPlayingDubbedAudio = false;
+                            try { audioFile.delete(); } catch (Throwable ignored) {}
+                            latch.countDown();
+                        });
+                        mediaPlayer.setOnErrorListener((mp, what, extra) -> {
+                            Log.w(TAG, "MediaPlayer playback error (" + what + ", " + extra + "), falling back to System TTS");
+                            playSystemTts(transText, latch);
+                            try { audioFile.delete(); } catch (Throwable ignored) {}
+                            return true;
+                        });
+                        mediaPlayer.prepare();
+                        mediaPlayer.start();
+                        playedWithMediaPlayer = true;
                     }
-                    mediaPlayer = new MediaPlayer();
-                    // USAGE_ASSISTANCE_NAVIGATION_GUIDANCE forces Android's system audio mixer
-                    // to duck background apps (like YouTube or Spotify) down to 20% volume!
-                    mediaPlayer.setAudioAttributes(new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build());
-                    mediaPlayer.setDataSource(audioFile.getAbsolutePath());
-                    mediaPlayer.setOnCompletionListener(mp -> {
-                        abandonNativeDuck();
-                        isPlayingDubbedAudio = false;
-                        latch.countDown();
-                    });
-                    mediaPlayer.setOnErrorListener((mp, what, extra) -> {
-                        abandonNativeDuck();
-                        isPlayingDubbedAudio = false;
-                        latch.countDown();
-                        return true;
-                    });
-                    mediaPlayer.prepare();
-                    mediaPlayer.start();
                 } catch (Throwable t) {
                     Log.e(TAG, "MediaPlayer setup error: " + t.getMessage(), t);
-                    abandonNativeDuck();
-                    isPlayingDubbedAudio = false;
-                    latch.countDown();
+                }
+
+                if (!playedWithMediaPlayer) {
+                    // Fallback to Native System TextToSpeech (always works offline & through media audio stream)
+                    playSystemTts(transText, latch);
+                    if (audioFile != null) {
+                        try { audioFile.delete(); } catch (Throwable ignored) {}
+                    }
                 }
             });
 
@@ -508,6 +539,39 @@ public class AudioCaptureService extends Service {
         }
     }
 
+    private void playSystemTts(String text, CountDownLatch latch) {
+        try {
+            if (systemTts != null && text != null && !text.isEmpty()) {
+                systemTts.setLanguage(new java.util.Locale(targetLang));
+                systemTts.setOnUtteranceProgressListener(new android.speech.tts.UtteranceProgressListener() {
+                    @Override public void onStart(String utteranceId) {}
+                    @Override
+                    public void onDone(String utteranceId) {
+                        abandonNativeDuck();
+                        isPlayingDubbedAudio = false;
+                        if (latch != null) latch.countDown();
+                    }
+                    @Override
+                    public void onError(String utteranceId) {
+                        abandonNativeDuck();
+                        isPlayingDubbedAudio = false;
+                        if (latch != null) latch.countDown();
+                    }
+                });
+                systemTts.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "dub_phrase_" + System.currentTimeMillis());
+            } else {
+                abandonNativeDuck();
+                isPlayingDubbedAudio = false;
+                if (latch != null) latch.countDown();
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "playSystemTts error: " + t.getMessage());
+            abandonNativeDuck();
+            isPlayingDubbedAudio = false;
+            if (latch != null) latch.countDown();
+        }
+    }
+
     private void requestNativeDuck() {
         try {
             AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
@@ -515,7 +579,7 @@ public class AudioCaptureService extends Service {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 if (nativeAudioFocusRequest == null) {
                     AudioAttributes attrs = new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build();
                     nativeAudioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
@@ -621,6 +685,10 @@ public class AudioCaptureService extends Service {
     @Override
     public void onDestroy() {
         stopAudioCapture();
+        if (systemTts != null) {
+            try { systemTts.stop(); systemTts.shutdown(); } catch (Throwable ignored) {}
+            systemTts = null;
+        }
         super.onDestroy();
     }
 }

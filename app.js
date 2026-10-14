@@ -976,7 +976,9 @@
           audioPlugin.addListener('dubResult', (event) => {
             if (event && event.original && event.translated && state.isDubbing) {
               elements.liveOriginalTranscript.textContent = event.original;
-              elements.liveDubbedTranscript.textContent = event.translated;
+              if (elements.liveTranslatedTranscript) {
+                elements.liveTranslatedTranscript.textContent = event.translated;
+              }
               updateTicker(`"${event.translated.slice(-35)}"`, 'listening');
               logTranscript(new Date().toLocaleTimeString(), event.original, event.translated);
             }

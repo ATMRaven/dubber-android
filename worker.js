@@ -235,7 +235,10 @@ export default {
               nl: 'aura-2-lars-nl',
               en: 'aura-2-thalia-en'
             };
-            const dgVoice = voice || voiceMap[targetLang] || 'aura-2-thalia-en';
+            let dgVoice = voiceMap[targetLang] || 'aura-2-thalia-en';
+            if (voice && voice.startsWith('aura-')) {
+              dgVoice = voice;
+            }
             const dgRes = await fetch(`https://api.deepgram.com/v1/speak?model=${encodeURIComponent(dgVoice)}`, {
               method: 'POST',
               headers: {
