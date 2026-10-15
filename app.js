@@ -81,7 +81,7 @@
     srcLang: localStorage.getItem(STORAGE_KEYS.SRC_LANG) || 'en-US',
     tgtLang: (function() {
       const saved = localStorage.getItem(STORAGE_KEYS.TGT_LANG);
-      const supported = ['fr-FR', 'en-US', 'es-ES', 'de-DE', 'ja-JP', 'it-IT', 'nl-NL'];
+      const supported = ['fr-FR', 'ar-SA', 'en-US', 'es-ES', 'de-DE', 'ja-JP', 'it-IT', 'nl-NL'];
       return (saved && supported.includes(saved)) ? saved : 'fr-FR';
     })(),
 
@@ -99,6 +99,7 @@
     // TTS & Voice
     ttsEngine: localStorage.getItem(STORAGE_KEYS.TTS_ENGINE) || 'mistral',
     mistralVoice: localStorage.getItem('dubber_mistral_voice') || 'fr_marie_happy',
+    elevenlabsVoice: localStorage.getItem('dubber_elevenlabs_voice') || 'EXAVITQu4vr4xnSDxMaL',
     voiceUri: localStorage.getItem(STORAGE_KEYS.VOICE_URI) || '',
     voiceRate: parseFloat(localStorage.getItem(STORAGE_KEYS.VOICE_RATE)) || 1.10,
     voicePitch: parseFloat(localStorage.getItem(STORAGE_KEYS.VOICE_PITCH)) || 1.00,
@@ -208,6 +209,8 @@
     ttsEngineSelect: document.getElementById('ttsEngineSelect'),
     mistralVoiceGroup: document.getElementById('mistralVoiceGroup'),
     mistralVoiceSelect: document.getElementById('mistralVoiceSelect'),
+    elevenlabsVoiceGroup: document.getElementById('elevenlabsVoiceGroup'),
+    elevenlabsVoiceSelect: document.getElementById('elevenlabsVoiceSelect'),
     speechSynthVoiceGroup: document.getElementById('speechSynthVoiceGroup'),
     refreshVoicesBtn: document.getElementById('refreshVoicesBtn'),
     voiceSelect: document.getElementById('voiceSelect'),
@@ -970,10 +973,13 @@
           const tCode = (state.tgtLang || 'fr').split('-')[0].toLowerCase();
           let chosenEngine = state.ttsEngine;
           if (!chosenEngine) {
-            chosenEngine = (tCode === 'fr') ? 'mistral' : 'deepgram';
+            chosenEngine = (tCode === 'fr') ? 'mistral' : (tCode === 'ar' ? 'elevenlabs' : 'deepgram');
           }
           let chosenVoice = '';
-          if (chosenEngine === 'mistral') {
+          if (chosenEngine === 'elevenlabs' || tCode === 'ar') {
+            chosenEngine = 'elevenlabs';
+            chosenVoice = state.elevenlabsVoice || 'EXAVITQu4vr4xnSDxMaL';
+          } else if (chosenEngine === 'mistral') {
             chosenVoice = state.mistralVoice || (tCode === 'fr' ? 'fr_marie_happy' : 'en_paul_happy');
           } else {
             const dgVoiceMap = {
@@ -1467,6 +1473,30 @@
    */
   async function prefetchAudioBuffer(text) {
     const langPrefix = state.tgtLang.split('-')[0].toLowerCase();
+
+    // 0. ElevenLabs Flash v2.5 (Sub-second studio neural Arabic & Multilingual)
+    if (state.ttsEngine === 'elevenlabs' || langPrefix === 'ar') {
+      try {
+        const elUrl = 'https://dubber.atmr.workers.dev/api/elevenlabs/tts';
+        const res = await fetch(elUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: text,
+            voice: state.elevenlabsVoice || 'EXAVITQu4vr4xnSDxMaL',
+            model: 'eleven_flash_v2_5'
+          })
+        });
+        if (res.ok) {
+          const arrayBuffer = await res.arrayBuffer();
+          const ctx = initAudioContext();
+          if (ctx.state === 'suspended') await ctx.resume();
+          return await ctx.decodeAudioData(arrayBuffer);
+        }
+      } catch (err) {
+        console.warn('ElevenLabs prefetch failed, will fallback:', err.message);
+      }
+    }
 
     // 1. Mistral Voxtral (Ultra-Natural French and English Studio Neural TTS)
     if (state.ttsEngine === 'mistral') {
@@ -2226,18 +2256,29 @@
       elements.pillTgtBadge.textContent = state.tgtLang.slice(0, 2).toUpperCase();
       elements.labelTgtLang.textContent = getLanguageName(state.tgtLang);
 
-      // Default engine for French is Mistral Voxtral; for other supported languages, default to Deepgram Aura-2
+      // Default engine routing:
+      // Arabic -> ElevenLabs (Flash v2.5)
+      // French -> Mistral Voxtral (fr_marie_happy)
+      // ES, DE, JA, IT, NL -> Deepgram Aura-2
       const tCode = state.tgtLang.split('-')[0].toLowerCase();
-      if (tCode === 'fr') {
+      if (tCode === 'ar') {
+        elements.ttsEngineSelect.value = 'elevenlabs';
+        state.ttsEngine = 'elevenlabs';
+        localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, 'elevenlabs');
+        if (elements.elevenlabsVoiceGroup) elements.elevenlabsVoiceGroup.classList.remove('hidden');
+        if (elements.mistralVoiceGroup) elements.mistralVoiceGroup.classList.add('hidden');
+      } else if (tCode === 'fr') {
         elements.ttsEngineSelect.value = 'mistral';
         state.ttsEngine = 'mistral';
         localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, 'mistral');
         if (elements.mistralVoiceGroup) elements.mistralVoiceGroup.classList.remove('hidden');
-      } else if (elements.ttsEngineSelect.value === 'mistral') {
+        if (elements.elevenlabsVoiceGroup) elements.elevenlabsVoiceGroup.classList.add('hidden');
+      } else if (elements.ttsEngineSelect.value === 'mistral' || elements.ttsEngineSelect.value === 'elevenlabs') {
         elements.ttsEngineSelect.value = 'deepgram';
         state.ttsEngine = 'deepgram';
         localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, 'deepgram');
         if (elements.mistralVoiceGroup) elements.mistralVoiceGroup.classList.add('hidden');
+        if (elements.elevenlabsVoiceGroup) elements.elevenlabsVoiceGroup.classList.add('hidden');
       }
       populateVoiceList();
     });
@@ -2263,9 +2304,19 @@
       if (elements.mistralVoiceGroup) {
         elements.mistralVoiceGroup.classList.toggle('hidden', eng !== 'mistral');
       }
+      if (elements.elevenlabsVoiceGroup) {
+        elements.elevenlabsVoiceGroup.classList.toggle('hidden', eng !== 'elevenlabs');
+      }
       elements.openRouterVoiceGroup.classList.toggle('hidden', eng !== 'openrouter');
       elements.speechSynthVoiceGroup.classList.toggle('hidden', eng !== 'speechSynthesis');
     });
+
+    if (elements.elevenlabsVoiceSelect) {
+      elements.elevenlabsVoiceSelect.addEventListener('change', () => {
+        state.elevenlabsVoice = elements.elevenlabsVoiceSelect.value;
+        localStorage.setItem('dubber_elevenlabs_voice', state.elevenlabsVoice);
+      });
+    }
 
     // Sliders
     elements.voiceRateSlider.addEventListener('input', () => {
@@ -2524,6 +2575,12 @@
     }
     if (elements.mistralVoiceGroup) {
       elements.mistralVoiceGroup.classList.toggle('hidden', state.ttsEngine !== 'mistral');
+    }
+    if (elements.elevenlabsVoiceSelect) {
+      elements.elevenlabsVoiceSelect.value = state.elevenlabsVoice;
+    }
+    if (elements.elevenlabsVoiceGroup) {
+      elements.elevenlabsVoiceGroup.classList.toggle('hidden', state.ttsEngine !== 'elevenlabs');
     }
     elements.openRouterVoiceGroup.classList.toggle('hidden', state.ttsEngine !== 'openrouter');
     elements.speechSynthVoiceGroup.classList.toggle('hidden', state.ttsEngine !== 'speechSynthesis');

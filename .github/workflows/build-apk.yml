@@ -56,10 +56,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cp android/app/build/outputs/apk/debug/app-debug.apk Dubber.apk
-          gh release create v1.3.9 Dubber.apk \
-            --title "Dubber Android v1.3.9" \
-            --notes "Dubber v1.3.9: Target languages streamlined to 7 fully-supported neural output languages (FR, EN, ES, DE, JA, IT, NL), Mistral Voxtral (Marie) set as official default engine & voice for French dubbing, and dynamic engine routing." \
-            || gh release upload v1.3.9 Dubber.apk --clobber
+          gh release create v1.4.0 Dubber.apk \
+            --title "Dubber Android v1.4.0" \
+            --notes "Dubber v1.4.0: Integrated ElevenLabs Flash v2.5 for studio-grade natural Arabic speech dubbing, added Arabic to supported target languages with smart engine routing, Sarah and Brian neural voices, and updated Edge Worker." \
+            || gh release upload v1.4.0 Dubber.apk --clobber
+          gh release upload v1.3.9 Dubber.apk --clobber || true
           gh release upload v1.3.8 Dubber.apk --clobber || true
           gh release upload v1.3.7 Dubber.apk --clobber || true
           gh release upload v1.3.6 Dubber.apk --clobber || true

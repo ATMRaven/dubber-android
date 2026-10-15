@@ -222,11 +222,43 @@ export default {
           }
         }
 
-        // 3. Synthesize Speech (Mistral Voxtral for FR/EN or Deepgram Aura-2)
+        // 3. Synthesize Speech (ElevenLabs for Arabic / Multilingual, Mistral Voxtral for FR/EN, Deepgram Aura-2)
         let audioBlob = null;
         let contentType = 'audio/mpeg';
 
-        if (engine === 'mistral' && (targetLang === 'fr' || targetLang === 'en') && env.MISTRAL_API_KEY) {
+        // ElevenLabs Flash v2.5 synthesis (blazing-fast ~400ms for Arabic and high-fidelity output)
+        if ((engine === 'elevenlabs' || targetLang === 'ar') && env.ELEVENLABS_API_KEY) {
+          try {
+            const elVoice = (voice && !voice.startsWith('aura-') && !voice.startsWith('fr_'))
+              ? voice
+              : 'EXAVITQu4vr4xnSDxMaL'; // Sarah
+            const elRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(elVoice)}?output_format=mp3_44100_128`, {
+              method: 'POST',
+              headers: {
+                'xi-api-key': env.ELEVENLABS_API_KEY,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                text: translatedText.trim(),
+                model_id: 'eleven_flash_v2_5',
+                voice_settings: {
+                  stability: 0.5,
+                  similarity_boost: 0.75
+                }
+              })
+            });
+            if (elRes.ok) {
+              audioBlob = await elRes.arrayBuffer();
+            } else {
+              console.warn('ElevenLabs TTS error in /api/dub:', await elRes.text());
+            }
+          } catch (elErr) {
+            console.warn('ElevenLabs TTS fetch error in /api/dub:', elErr);
+          }
+        }
+
+        // Mistral Voxtral route for FR / EN
+        if (!audioBlob && engine === 'mistral' && (targetLang === 'fr' || targetLang === 'en') && env.MISTRAL_API_KEY) {
           try {
             const mistralVoice = voice || (targetLang === 'fr' ? 'fr_marie_happy' : 'en_paul_happy');
             const mistralRes = await fetch('https://api.mistral.ai/v1/audio/speech', {
@@ -337,8 +369,35 @@ export default {
 
         // Voice mapping for Deepgram Aura-2
         const tCode = targetLang.split('-')[0].toLowerCase();
+        if (tCode === 'ar' && env.ELEVENLABS_API_KEY) {
+          // Seamless ElevenLabs route for Arabic
+          const elVoice = voiceModel || 'EXAVITQu4vr4xnSDxMaL';
+          const elRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(elVoice)}?output_format=mp3_44100_128`, {
+            method: 'POST',
+            headers: {
+              'xi-api-key': env.ELEVENLABS_API_KEY,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              text: text.trim(),
+              model_id: 'eleven_flash_v2_5',
+              voice_settings: { stability: 0.5, similarity_boost: 0.75 }
+            })
+          });
+          if (elRes.ok) {
+            const audioData = await elRes.arrayBuffer();
+            return new Response(audioData, {
+              status: 200,
+              headers: {
+                'Content-Type': 'audio/mpeg',
+                'Access-Control-Allow-Origin': '*',
+                'Cache-Control': 'public, max-age=86400'
+              }
+            });
+          }
+        }
         if (tCode === 'ar' && !voiceModel) {
-          return new Response(JSON.stringify({ error: 'Deepgram does not support Arabic Aura-2 voices yet. Please use SpeechSynthesis or OpenRouter.' }), {
+          return new Response(JSON.stringify({ error: 'Deepgram does not support Arabic Aura-2 voices yet. Please configure ElevenLabs or use SpeechSynthesis.' }), {
             status: 400,
             headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
           });
@@ -479,6 +538,80 @@ export default {
             'Content-Type': 'audio/mpeg',
             'Access-Control-Allow-Origin': '*',
             'Cache-Control': 'public, max-age=3600'
+          }
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+        });
+      }
+    }
+
+    // ElevenLabs Ultra-Fast Neural TTS Endpoint (Arabic & Multilingual Flash v2.5)
+    if (url.pathname === '/api/elevenlabs/tts') {
+      try {
+        let text = '';
+        let voiceId = 'EXAVITQu4vr4xnSDxMaL'; // Sarah - fluent Arabic
+        let modelId = 'eleven_flash_v2_5';
+
+        if (request.method === 'POST') {
+          const body = await request.json().catch(() => ({}));
+          text = body.text || '';
+          if (body.voice) voiceId = body.voice;
+          if (body.model) modelId = body.model;
+        } else {
+          text = url.searchParams.get('text') || '';
+          if (url.searchParams.get('voice')) voiceId = url.searchParams.get('voice');
+          if (url.searchParams.get('model')) modelId = url.searchParams.get('model');
+        }
+
+        if (!text || !text.trim()) {
+          return new Response(JSON.stringify({ error: 'Missing text' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        const elevenKey = env.ELEVENLABS_API_KEY;
+        if (!elevenKey) {
+          return new Response(JSON.stringify({ error: 'ElevenLabs API key not configured on server' }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        const elRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`, {
+          method: 'POST',
+          headers: {
+            'xi-api-key': elevenKey,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            text: text.trim(),
+            model_id: modelId,
+            voice_settings: {
+              stability: 0.5,
+              similarity_boost: 0.75
+            }
+          })
+        });
+
+        if (!elRes.ok) {
+          const errText = await elRes.text();
+          return new Response(errText, {
+            status: elRes.status,
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        const audioBytes = await elRes.arrayBuffer();
+        return new Response(audioBytes, {
+          status: 200,
+          headers: {
+            'Content-Type': 'audio/mpeg',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=86400'
           }
         });
       } catch (err) {

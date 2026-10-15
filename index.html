@@ -92,7 +92,7 @@
             <polyline points="7 10 12 15 17 10"/>
             <line x1="12" y1="15" x2="12" y2="3"/>
           </svg>
-          Get APK (v1.3.9)
+          Get APK (v1.4.0)
         </a>
         <button type="button" class="btn btn-secondary btn-sm" id="headerTestSpeechBtn" title="Simulate a speech input to test pipeline">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -415,6 +415,7 @@
             <label for="tgtLangSelect" class="form-label">Target Language (Dubbing)</label>
             <select id="tgtLangSelect" class="form-select">
               <option value="fr-FR" selected>French (Français)</option>
+              <option value="ar-SA">Arabic (العربية) — ElevenLabs</option>
               <option value="en-US">English (English)</option>
               <option value="es-ES">Spanish (Español)</option>
               <option value="de-DE">German (Deutsch)</option>
@@ -496,6 +497,7 @@
           <label for="ttsEngineSelect" class="form-label">TTS Engine</label>
           <select id="ttsEngineSelect" class="form-select">
             <option value="mistral" selected>Mistral Voxtral: Marie (Fast &amp; Natural - French Default)</option>
+            <option value="elevenlabs">ElevenLabs Flash (Studio Arabic &amp; Multilingual - Arabic Default)</option>
             <option value="deepgram">Deepgram Aura-2 (Studio Quality - FR, ES, DE, JA, IT, NL, EN)</option>
             <option value="speechSynthesis">On-Device SpeechSynthesis (Instant / 100% Free)</option>
             <option value="openrouter">OpenRouter Audio / TTS Endpoint</option>
@@ -512,6 +514,17 @@
             <option value="gb_oliver_confident">gb_oliver_confident (Oliver - Clear &amp; Articulate, English)</option>
           </select>
           <span class="field-hint" style="font-size: 11px; color: var(--color-zinc-400); margin-top: 4px; display: block;">Voxtral Mini TTS: Studio-grade expressive neural speech. Auto-selects French or English based on target language.</span>
+        </div>
+
+        <div class="form-group hidden" id="elevenlabsVoiceGroup">
+          <label for="elevenlabsVoiceSelect" class="form-label">ElevenLabs Voice</label>
+          <select id="elevenlabsVoiceSelect" class="form-select">
+            <option value="EXAVITQu4vr4xnSDxMaL" selected>Sarah (Mature, Fluent &amp; Clear Arabic / English)</option>
+            <option value="nPczCjzI2devNBz1zQrb">Brian (Deep, Resonant &amp; Authoritative)</option>
+            <option value="JBFqnCBsd6RMkjVDRZzb">George (Warm &amp; Natural Storyteller)</option>
+            <option value="pNInz6obpgDQGcFmaJgB">Adam (Firm &amp; Confident)</option>
+          </select>
+          <span class="field-hint" style="font-size: 11px; color: var(--color-zinc-400); margin-top: 4px; display: block;">ElevenLabs Flash v2.5: Sub-second high-fidelity neural Arabic speech synthesis.</span>
         </div>
 
         <div class="form-group hidden" id="speechSynthVoiceGroup">

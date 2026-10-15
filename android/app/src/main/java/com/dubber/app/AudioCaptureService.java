@@ -164,13 +164,25 @@ public class AudioCaptureService extends Service {
                 if (eng != null && !eng.isEmpty()) {
                     engine = eng;
                 } else {
-                    engine = "fr".equalsIgnoreCase(targetLang) ? "mistral" : "deepgram";
+                    if ("ar".equalsIgnoreCase(targetLang)) {
+                        engine = "elevenlabs";
+                    } else if ("fr".equalsIgnoreCase(targetLang)) {
+                        engine = "mistral";
+                    } else {
+                        engine = "deepgram";
+                    }
                 }
                 String v = intent.getStringExtra("voice");
                 if (v != null && !v.isEmpty()) {
                     voice = v;
                 } else {
-                    voice = "fr".equalsIgnoreCase(targetLang) ? "fr_marie_happy" : "aura-2-agathe-fr";
+                    if ("ar".equalsIgnoreCase(targetLang)) {
+                        voice = "EXAVITQu4vr4xnSDxMaL";
+                    } else if ("fr".equalsIgnoreCase(targetLang)) {
+                        voice = "fr_marie_happy";
+                    } else {
+                        voice = "aura-2-agathe-fr";
+                    }
                 }
 
                 // Android requirement: startForeground must occur first
