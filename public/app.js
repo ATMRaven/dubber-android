@@ -227,6 +227,22 @@
     resetDefaultsBtn: document.getElementById('resetDefaultsBtn'),
     saveDrawerBtn: document.getElementById('saveDrawerBtn'),
 
+    // Hero Casual Controls
+    heroDubBtn: document.getElementById('heroDubBtn'),
+    heroDubIcon: document.getElementById('heroDubIcon'),
+    heroDubLabel: document.getElementById('heroDubLabel'),
+    heroStatusDot: document.getElementById('heroStatusDot'),
+    heroStatusText: document.getElementById('heroStatusText'),
+    heroSrcLangSelect: document.getElementById('heroSrcLangSelect'),
+    heroTgtLangSelect: document.getElementById('heroTgtLangSelect'),
+    heroSwapLangsBtn: document.getElementById('heroSwapLangsBtn'),
+    modeAppAudioBtn: document.getElementById('modeAppAudioBtn'),
+    modeLiveMicBtn: document.getElementById('modeLiveMicBtn'),
+    modeHelperText: document.getElementById('modeHelperText'),
+    heroDemoBtn: document.getElementById('heroDemoBtn'),
+    speechIndicator: document.getElementById('speechIndicator'),
+    casualVoiceSelect: document.getElementById('casualVoiceSelect'),
+
     // Utilities
     toastContainer: document.getElementById('toastContainer'),
     demoAudioPlayer: document.getElementById('demoAudioPlayer')
@@ -252,7 +268,9 @@
 
   function setStatus(status, customText) {
     state.status = status;
-    elements.statusDot.className = `status-dot status-${status}`;
+    if (elements.statusDot) {
+      elements.statusDot.className = `status-dot status-${status}`;
+    }
     
     let text = 'Ready';
     if (status === 'listening') text = 'Listening';
@@ -260,8 +278,38 @@
     else if (status === 'dubbing') text = 'Dubbing';
     else if (status === 'error') text = 'Error';
 
-    elements.statusText.textContent = customText || text;
-    elements.pillStatus.title = `System Status: ${customText || text}`;
+    const displayText = customText || text;
+    if (elements.statusText) elements.statusText.textContent = displayText;
+    if (elements.pillStatus) elements.pillStatus.title = `System Status: ${displayText}`;
+
+    // Sync with Hero Status Line
+    if (elements.heroStatusDot) {
+      elements.heroStatusDot.className = `hero-status-dot status-${status}`;
+    }
+    if (elements.heroStatusText) {
+      if (status === 'idle') {
+        elements.heroStatusText.textContent = 'Ready — Tap Start, then play YouTube or your video';
+      } else if (status === 'listening') {
+        elements.heroStatusText.textContent = state.captureSource === 'display' 
+          ? 'Listening to video audio...' 
+          : 'Listening to microphone...';
+      } else if (status === 'translating') {
+        elements.heroStatusText.textContent = 'Translating speech...';
+      } else if (status === 'dubbing') {
+        elements.heroStatusText.textContent = `Speaking in ${getLanguageName(state.tgtLang)}...`;
+      } else if (status === 'error') {
+        elements.heroStatusText.textContent = customText || 'Error detected. Check settings.';
+      }
+    }
+
+    // Toggle live speaking indicator wave
+    if (elements.speechIndicator) {
+      if (status === 'dubbing') {
+        elements.speechIndicator.classList.remove('hidden');
+      } else {
+        elements.speechIndicator.classList.add('hidden');
+      }
+    }
   }
 
   function updateTicker(text, type = 'normal') {
@@ -1873,6 +1921,18 @@
         </svg>
       `;
 
+      if (elements.heroDubBtn) {
+        elements.heroDubBtn.classList.add('is-active');
+        if (elements.heroDubLabel) elements.heroDubLabel.textContent = 'Stop Dubbing';
+        if (elements.heroDubIcon) {
+          elements.heroDubIcon.innerHTML = `
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="6" y="6" width="12" height="12"/>
+            </svg>
+          `;
+        }
+      }
+
       setStatus('listening');
       updateTicker('Dubber active. Listening...', 'listening');
       showToast('Real-time dubbing started!', 'success');
@@ -1921,6 +1981,19 @@
         <polygon points="5 3 19 12 5 21 5 3"/>
       </svg>
     `;
+
+    // Reset Hero CTA
+    if (elements.heroDubBtn) {
+      elements.heroDubBtn.classList.remove('is-active');
+      if (elements.heroDubLabel) elements.heroDubLabel.textContent = 'Start Dubbing';
+      if (elements.heroDubIcon) {
+        elements.heroDubIcon.innerHTML = `
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+        `;
+      }
+    }
 
     setStatus('idle');
     updateTicker('Dubber stopped. Ready.', 'normal');
@@ -2053,6 +2126,7 @@
   function openDrawer() {
     elements.settingsDrawer.classList.add('is-open');
     elements.drawerBackdrop.classList.add('is-open');
+    populateCasualVoiceList();
     populateVoiceList();
   }
 
@@ -2060,6 +2134,161 @@
     elements.settingsDrawer.classList.remove('is-open');
     elements.drawerBackdrop.classList.remove('is-open');
     saveSettingsFromDrawer();
+  }
+
+  function applyDefaultVoiceForTargetLanguage() {
+    const tCode = state.tgtLang.split('-')[0].toLowerCase();
+    if (tCode === 'ar') {
+      state.ttsEngine = 'elevenlabs';
+      state.elevenlabsVoice = 'EXAVITQu4vr4xnSDxMaL';
+      localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, 'elevenlabs');
+      localStorage.setItem('dubber_elevenlabs_voice', state.elevenlabsVoice);
+    } else if (tCode === 'fr') {
+      state.ttsEngine = 'mistral';
+      state.mistralVoice = 'fr_marie_happy';
+      localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, 'mistral');
+      localStorage.setItem('dubber_mistral_voice', state.mistralVoice);
+    } else if (tCode === 'en') {
+      state.ttsEngine = 'mistral';
+      state.mistralVoice = 'en_paul_happy';
+      localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, 'mistral');
+      localStorage.setItem('dubber_mistral_voice', state.mistralVoice);
+    } else {
+      state.ttsEngine = 'deepgram';
+      localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, 'deepgram');
+    }
+    if (elements.ttsEngineSelect) elements.ttsEngineSelect.value = state.ttsEngine;
+    if (elements.mistralVoiceSelect) elements.mistralVoiceSelect.value = state.mistralVoice;
+    if (elements.elevenlabsVoiceSelect) elements.elevenlabsVoiceSelect.value = state.elevenlabsVoice;
+  }
+
+  function populateCasualVoiceList() {
+    if (!elements.casualVoiceSelect) return;
+    const tCode = state.tgtLang.split('-')[0].toLowerCase();
+    elements.casualVoiceSelect.innerHTML = '';
+
+    let options = [];
+    if (tCode === 'fr') {
+      options = [
+        { value: 'mistral:fr_marie_happy', label: 'Marie — Radiant & Natural (French Mistral Voxtral) [Default]' },
+        { value: 'mistral:fr_marie', label: 'Marie — Classic (French Mistral Voxtral)' },
+        { value: 'deepgram:aura-agathe-fr', label: 'Agathe — Studio Narrator (French Deepgram Aura-2)' },
+        { value: 'speechSynthesis:system', label: 'Device Built-in System Voice' }
+      ];
+    } else if (tCode === 'ar') {
+      options = [
+        { value: 'elevenlabs:EXAVITQu4vr4xnSDxMaL', label: 'Sarah — Clear & Fluent (Arabic ElevenLabs Flash) [Default]' },
+        { value: 'elevenlabs:nPczCjzI2devNBz1zQrb', label: 'Brian — Deep & Resonant (Arabic ElevenLabs Flash)' },
+        { value: 'elevenlabs:JBFqnCBsd6RMkjVDRZzb', label: 'George — Warm Storyteller (Arabic ElevenLabs)' },
+        { value: 'elevenlabs:pNInz6obpgDQGcFmaJgB', label: 'Adam — Confident Narrator (Arabic ElevenLabs)' },
+        { value: 'speechSynthesis:system', label: 'Device Built-in System Voice' }
+      ];
+    } else if (tCode === 'en') {
+      options = [
+        { value: 'mistral:en_paul_happy', label: 'Paul — Warm & Friendly (English Mistral Voxtral) [Default]' },
+        { value: 'mistral:gb_jane_confident', label: 'Jane — Crisp British (English Mistral Voxtral)' },
+        { value: 'mistral:gb_oliver_confident', label: 'Oliver — Articulate British (English Mistral Voxtral)' },
+        { value: 'elevenlabs:EXAVITQu4vr4xnSDxMaL', label: 'Sarah — Clear & Fluent (English ElevenLabs)' },
+        { value: 'deepgram:aura-asteria-en', label: 'Asteria — Conversational (English Deepgram)' },
+        { value: 'speechSynthesis:system', label: 'Device Built-in System Voice' }
+      ];
+    } else if (tCode === 'es') {
+      options = [
+        { value: 'deepgram:aura-alvaro-es', label: 'Alvaro — Studio Spanish (Deepgram Aura-2) [Default]' },
+        { value: 'speechSynthesis:system', label: 'Device Built-in System Voice' }
+      ];
+    } else if (tCode === 'de') {
+      options = [
+        { value: 'deepgram:aura-julius-de', label: 'Julius — Studio German (Deepgram Aura-2) [Default]' },
+        { value: 'speechSynthesis:system', label: 'Device Built-in System Voice' }
+      ];
+    } else if (tCode === 'ja') {
+      options = [
+        { value: 'deepgram:aura-ama-ja', label: 'Ama — Studio Japanese (Deepgram Aura-2) [Default]' },
+        { value: 'speechSynthesis:system', label: 'Device Built-in System Voice' }
+      ];
+    } else if (tCode === 'it') {
+      options = [
+        { value: 'deepgram:aura-elio-it', label: 'Elio — Studio Italian (Deepgram Aura-2) [Default]' },
+        { value: 'speechSynthesis:system', label: 'Device Built-in System Voice' }
+      ];
+    } else if (tCode === 'nl') {
+      options = [
+        { value: 'deepgram:aura-lars-nl', label: 'Lars — Studio Dutch (Deepgram Aura-2) [Default]' },
+        { value: 'speechSynthesis:system', label: 'Device Built-in System Voice' }
+      ];
+    } else {
+      options = [
+        { value: 'deepgram:default', label: 'Neural Studio Voice (Deepgram Aura-2)' },
+        { value: 'speechSynthesis:system', label: 'Device Built-in System Voice' }
+      ];
+    }
+
+    let currentVal = '';
+    if (state.ttsEngine === 'mistral') {
+      currentVal = `mistral:${state.mistralVoice}`;
+    } else if (state.ttsEngine === 'elevenlabs') {
+      currentVal = `elevenlabs:${state.elevenlabsVoice}`;
+    } else if (state.ttsEngine === 'deepgram') {
+      currentVal = options[0]?.value || 'deepgram:default';
+    } else {
+      currentVal = 'speechSynthesis:system';
+    }
+
+    options.forEach(opt => {
+      const el = document.createElement('option');
+      el.value = opt.value;
+      el.textContent = opt.label;
+      if (opt.value === currentVal || (!options.some(o => o.value === currentVal) && opt === options[0])) {
+        el.selected = true;
+      }
+      elements.casualVoiceSelect.appendChild(el);
+    });
+  }
+
+  function handleQuickDemo() {
+    const tCode = state.tgtLang.split('-')[0].toLowerCase();
+    let original = 'Welcome to Dubber. Real-time video dubbing is working smoothly.';
+    let translation = 'Bonjour et bienvenue sur Dubber. Le doublage vocal en temps réel fonctionne parfaitement.';
+
+    if (tCode === 'fr') {
+      original = 'Welcome to Dubber. Real-time video dubbing is working smoothly.';
+      translation = 'Bonjour et bienvenue sur Dubber. Le doublage vocal en temps réel fonctionne parfaitement.';
+    } else if (tCode === 'ar') {
+      original = 'Welcome to Dubber. Real-time video dubbing is working smoothly.';
+      translation = 'مرحبا بكم في دبلر. الدبلجة الصوتية في الوقت الفعلي تعمل بنجاح.';
+    } else if (tCode === 'es') {
+      original = 'Welcome to Dubber. Real-time video dubbing is working smoothly.';
+      translation = 'Hola y bienvenido a Dubber. El doblaje de voz en tiempo real funciona perfectamente.';
+    } else if (tCode === 'de') {
+      original = 'Welcome to Dubber. Real-time video dubbing is working smoothly.';
+      translation = 'Hallo und willkommen bei Dubber. Die Echtzeit-Sprachsynchronisation funktioniert einwandfrei.';
+    } else if (tCode === 'ja') {
+      original = 'Welcome to Dubber. Real-time video dubbing is working smoothly.';
+      translation = 'Dubberへようこそ。リアルタイム音声吹き替えが正常に動作しています。';
+    } else if (tCode === 'it') {
+      original = 'Welcome to Dubber. Real-time video dubbing is working smoothly.';
+      translation = 'Benvenuto su Dubber. Il doppiaggio vocale in tempo reale funziona perfettamente.';
+    } else if (tCode === 'nl') {
+      original = 'Welcome to Dubber. Real-time video dubbing is working smoothly.';
+      translation = 'Welkom bij Dubber. Realtime stemnasynchronisatie werkt perfect.';
+    } else if (tCode === 'en') {
+      original = 'Bonjour et bienvenue sur Dubber.';
+      translation = 'Hello and welcome to Dubber. Real-time voice dubbing is working smoothly.';
+    }
+
+    if (elements.liveOriginalTranscript) {
+      elements.liveOriginalTranscript.textContent = original;
+    }
+    if (elements.liveTranslatedTranscript) {
+      elements.liveTranslatedTranscript.textContent = translation;
+    }
+
+    appendTranscriptRow(original, translation);
+    updateTicker(`Demo: "${translation}"`, 'normal');
+    showToast(`Playing sample dubbing in ${getLanguageName(state.tgtLang)}...`, 'info', 2500);
+
+    enqueueAudioChunk(translation);
   }
 
   function populateVoiceList() {
@@ -2128,6 +2357,19 @@
     state.tgtLang = elements.tgtLangSelect.value;
     localStorage.setItem(STORAGE_KEYS.SRC_LANG, state.srcLang);
     localStorage.setItem(STORAGE_KEYS.TGT_LANG, state.tgtLang);
+
+    if (elements.heroSrcLangSelect) elements.heroSrcLangSelect.value = state.srcLang;
+    if (elements.heroTgtLangSelect) elements.heroTgtLangSelect.value = state.tgtLang;
+
+    if (state.captureSource === 'display') {
+      if (elements.modeAppAudioBtn) elements.modeAppAudioBtn.classList.add('is-active');
+      if (elements.modeLiveMicBtn) elements.modeLiveMicBtn.classList.remove('is-active');
+      if (elements.modeHelperText) elements.modeHelperText.textContent = 'Dubs YouTube, games, and videos playing on your device in the background.';
+    } else {
+      if (elements.modeLiveMicBtn) elements.modeLiveMicBtn.classList.add('is-active');
+      if (elements.modeAppAudioBtn) elements.modeAppAudioBtn.classList.remove('is-active');
+      if (elements.modeHelperText) elements.modeHelperText.textContent = 'Dubs voices picked up by your device microphone for in-person conversations.';
+    }
 
     elements.pillSrcBadge.textContent = state.srcLang.slice(0, 2).toUpperCase();
     elements.pillTgtBadge.textContent = state.tgtLang.slice(0, 2).toUpperCase();
@@ -2218,10 +2460,136 @@
     elements.headerSettingsBtn.addEventListener('click', openDrawer);
     elements.pillLangBadge.addEventListener('click', openDrawer);
 
+    // Hero Casual Controls
+    if (elements.heroDubBtn) {
+      elements.heroDubBtn.addEventListener('click', toggleDubbing);
+    }
+
+    if (elements.heroDemoBtn) {
+      elements.heroDemoBtn.addEventListener('click', handleQuickDemo);
+    }
+
+    // Hero Mode Switcher
+    if (elements.modeAppAudioBtn) {
+      elements.modeAppAudioBtn.addEventListener('click', () => {
+        state.captureSource = 'display';
+        localStorage.setItem(STORAGE_KEYS.CAPTURE_SOURCE, 'display');
+        elements.modeAppAudioBtn.classList.add('is-active');
+        if (elements.modeLiveMicBtn) elements.modeLiveMicBtn.classList.remove('is-active');
+        elements.modeAppAudioBtn.setAttribute('aria-selected', 'true');
+        if (elements.modeLiveMicBtn) elements.modeLiveMicBtn.setAttribute('aria-selected', 'false');
+        if (elements.sourceDisplayRadio) elements.sourceDisplayRadio.checked = true;
+        if (elements.sourceMicRadio) elements.sourceMicRadio.checked = false;
+        if (elements.modeHelperText) {
+          elements.modeHelperText.textContent = 'Dubs YouTube, games, and videos playing on your device in the background.';
+        }
+        if (elements.statSource) elements.statSource.innerHTML = 'Source: <strong>Screen/Tab</strong>';
+        showToast('Mode: App & Video Audio', 'info', 1600);
+      });
+    }
+
+    if (elements.modeLiveMicBtn) {
+      elements.modeLiveMicBtn.addEventListener('click', () => {
+        state.captureSource = 'mic';
+        localStorage.setItem(STORAGE_KEYS.CAPTURE_SOURCE, 'mic');
+        elements.modeLiveMicBtn.classList.add('is-active');
+        if (elements.modeAppAudioBtn) elements.modeAppAudioBtn.classList.remove('is-active');
+        elements.modeLiveMicBtn.setAttribute('aria-selected', 'true');
+        if (elements.modeAppAudioBtn) elements.modeAppAudioBtn.setAttribute('aria-selected', 'false');
+        if (elements.sourceMicRadio) elements.sourceMicRadio.checked = true;
+        if (elements.sourceDisplayRadio) elements.sourceDisplayRadio.checked = false;
+        if (elements.modeHelperText) {
+          elements.modeHelperText.textContent = 'Dubs voices picked up by your device microphone for in-person conversations.';
+        }
+        if (elements.statSource) elements.statSource.innerHTML = 'Source: <strong>Mic</strong>';
+        showToast('Mode: Live Conversation (Mic)', 'info', 1600);
+      });
+    }
+
+    // Hero Language Selectors
+    if (elements.heroSrcLangSelect) {
+      elements.heroSrcLangSelect.addEventListener('change', () => {
+        state.srcLang = elements.heroSrcLangSelect.value;
+        if (elements.srcLangSelect) elements.srcLangSelect.value = state.srcLang;
+        localStorage.setItem(STORAGE_KEYS.SRC_LANG, state.srcLang);
+        elements.pillSrcBadge.textContent = state.srcLang.slice(0, 2).toUpperCase();
+        elements.labelSrcLang.textContent = getLanguageName(state.srcLang);
+      });
+    }
+
+    if (elements.heroTgtLangSelect) {
+      elements.heroTgtLangSelect.addEventListener('change', () => {
+        state.tgtLang = elements.heroTgtLangSelect.value;
+        if (elements.tgtLangSelect) elements.tgtLangSelect.value = state.tgtLang;
+        localStorage.setItem(STORAGE_KEYS.TGT_LANG, state.tgtLang);
+        elements.pillTgtBadge.textContent = state.tgtLang.slice(0, 2).toUpperCase();
+        elements.labelTgtLang.textContent = getLanguageName(state.tgtLang);
+
+        applyDefaultVoiceForTargetLanguage();
+        populateCasualVoiceList();
+        populateVoiceList();
+      });
+    }
+
+    // Hero Language Swap
+    if (elements.heroSwapLangsBtn) {
+      elements.heroSwapLangsBtn.addEventListener('click', () => {
+        const currentSrc = elements.heroSrcLangSelect ? elements.heroSrcLangSelect.value : state.srcLang;
+        const currentTgt = elements.heroTgtLangSelect ? elements.heroTgtLangSelect.value : state.tgtLang;
+        const isSrcSupportedTarget = Array.from(elements.tgtLangSelect.options).some(opt => opt.value === currentSrc);
+        if (isSrcSupportedTarget) {
+          state.srcLang = currentTgt;
+          state.tgtLang = currentSrc;
+        } else {
+          state.srcLang = currentTgt;
+        }
+        if (elements.heroSrcLangSelect) elements.heroSrcLangSelect.value = state.srcLang;
+        if (elements.heroTgtLangSelect) elements.heroTgtLangSelect.value = state.tgtLang;
+        if (elements.srcLangSelect) elements.srcLangSelect.value = state.srcLang;
+        if (elements.tgtLangSelect) elements.tgtLangSelect.value = state.tgtLang;
+        localStorage.setItem(STORAGE_KEYS.SRC_LANG, state.srcLang);
+        localStorage.setItem(STORAGE_KEYS.TGT_LANG, state.tgtLang);
+        elements.pillSrcBadge.textContent = state.srcLang.slice(0, 2).toUpperCase();
+        elements.pillTgtBadge.textContent = state.tgtLang.slice(0, 2).toUpperCase();
+        elements.labelSrcLang.textContent = getLanguageName(state.srcLang);
+        elements.labelTgtLang.textContent = getLanguageName(state.tgtLang);
+
+        applyDefaultVoiceForTargetLanguage();
+        populateCasualVoiceList();
+        populateVoiceList();
+        showToast(`Languages: ${getLanguageName(state.srcLang)} ➔ ${getLanguageName(state.tgtLang)}`, 'info', 1800);
+      });
+    }
+
+    // Casual Unified Voice Select
+    if (elements.casualVoiceSelect) {
+      elements.casualVoiceSelect.addEventListener('change', () => {
+        const parts = elements.casualVoiceSelect.value.split(':');
+        const engine = parts[0];
+        const voiceId = parts[1] || '';
+        state.ttsEngine = engine;
+        localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, engine);
+        if (elements.ttsEngineSelect) elements.ttsEngineSelect.value = engine;
+
+        if (engine === 'mistral') {
+          state.mistralVoice = voiceId;
+          localStorage.setItem('dubber_mistral_voice', voiceId);
+          if (elements.mistralVoiceSelect) elements.mistralVoiceSelect.value = voiceId;
+        } else if (engine === 'elevenlabs') {
+          state.elevenlabsVoice = voiceId;
+          localStorage.setItem('dubber_elevenlabs_voice', voiceId);
+          if (elements.elevenlabsVoiceSelect) elements.elevenlabsVoiceSelect.value = voiceId;
+        } else if (engine === 'speechSynthesis') {
+          state.voiceUri = '';
+        }
+        showToast(`Selected Voice: ${elements.casualVoiceSelect.options[elements.casualVoiceSelect.selectedIndex].text.split('—')[0].trim()}`, 'info', 1800);
+      });
+    }
+
     // Header Quick Test
-    elements.headerTestSpeechBtn.addEventListener('click', () => {
-      dispatchUtteranceChunk('Welcome to Dubber. Real-time video dubbing is working.');
-    });
+    if (elements.headerTestSpeechBtn) {
+      elements.headerTestSpeechBtn.addEventListener('click', handleQuickDemo);
+    }
 
     // Drawer Controls
     elements.closeDrawerBtn.addEventListener('click', closeDrawer);
@@ -2260,26 +2628,8 @@
       // Arabic -> ElevenLabs (Flash v2.5)
       // French -> Mistral Voxtral (fr_marie_happy)
       // ES, DE, JA, IT, NL -> Deepgram Aura-2
-      const tCode = state.tgtLang.split('-')[0].toLowerCase();
-      if (tCode === 'ar') {
-        elements.ttsEngineSelect.value = 'elevenlabs';
-        state.ttsEngine = 'elevenlabs';
-        localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, 'elevenlabs');
-        if (elements.elevenlabsVoiceGroup) elements.elevenlabsVoiceGroup.classList.remove('hidden');
-        if (elements.mistralVoiceGroup) elements.mistralVoiceGroup.classList.add('hidden');
-      } else if (tCode === 'fr') {
-        elements.ttsEngineSelect.value = 'mistral';
-        state.ttsEngine = 'mistral';
-        localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, 'mistral');
-        if (elements.mistralVoiceGroup) elements.mistralVoiceGroup.classList.remove('hidden');
-        if (elements.elevenlabsVoiceGroup) elements.elevenlabsVoiceGroup.classList.add('hidden');
-      } else if (elements.ttsEngineSelect.value === 'mistral' || elements.ttsEngineSelect.value === 'elevenlabs') {
-        elements.ttsEngineSelect.value = 'deepgram';
-        state.ttsEngine = 'deepgram';
-        localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, 'deepgram');
-        if (elements.mistralVoiceGroup) elements.mistralVoiceGroup.classList.add('hidden');
-        if (elements.elevenlabsVoiceGroup) elements.elevenlabsVoiceGroup.classList.add('hidden');
-      }
+      applyDefaultVoiceForTargetLanguage();
+      populateCasualVoiceList();
       populateVoiceList();
     });
 
@@ -2552,6 +2902,36 @@
     // Languages
     elements.srcLangSelect.value = state.srcLang;
     elements.tgtLangSelect.value = state.tgtLang;
+    if (elements.heroSrcLangSelect) elements.heroSrcLangSelect.value = state.srcLang;
+    if (elements.heroTgtLangSelect) elements.heroTgtLangSelect.value = state.tgtLang;
+
+    // Mode Switcher Active State
+    if (state.captureSource === 'display') {
+      if (elements.modeAppAudioBtn) {
+        elements.modeAppAudioBtn.classList.add('is-active');
+        elements.modeAppAudioBtn.setAttribute('aria-selected', 'true');
+      }
+      if (elements.modeLiveMicBtn) {
+        elements.modeLiveMicBtn.classList.remove('is-active');
+        elements.modeLiveMicBtn.setAttribute('aria-selected', 'false');
+      }
+      if (elements.modeHelperText) {
+        elements.modeHelperText.textContent = 'Dubs YouTube, games, and videos playing on your device in the background.';
+      }
+    } else {
+      if (elements.modeLiveMicBtn) {
+        elements.modeLiveMicBtn.classList.add('is-active');
+        elements.modeLiveMicBtn.setAttribute('aria-selected', 'true');
+      }
+      if (elements.modeAppAudioBtn) {
+        elements.modeAppAudioBtn.classList.remove('is-active');
+        elements.modeAppAudioBtn.setAttribute('aria-selected', 'false');
+      }
+      if (elements.modeHelperText) {
+        elements.modeHelperText.textContent = 'Dubs voices picked up by your device microphone for in-person conversations.';
+      }
+    }
+
     elements.pillSrcBadge.textContent = state.srcLang.slice(0, 2).toUpperCase();
     elements.pillTgtBadge.textContent = state.tgtLang.slice(0, 2).toUpperCase();
     elements.labelSrcLang.textContent = getLanguageName(state.srcLang);
@@ -2621,6 +3001,7 @@
         : (state.ttsEngine === 'speechSynthesis' ? 'SpeechSynth (Fast)' : 'OpenRouter TTS'));
     elements.statDuckingVal.textContent = state.duckingEnabled ? `Active (${state.duckingDepth}%)` : 'Disabled';
 
+    populateCasualVoiceList();
     populateVoiceList();
     clearVisualizerCanvas();
   }
