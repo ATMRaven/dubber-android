@@ -47,7 +47,8 @@ export default {
         const srcLang = (url.searchParams.get('src') || 'en').split('-')[0].toLowerCase();
         const targetLang = (url.searchParams.get('target') || 'fr').split('-')[0].toLowerCase();
         const voice = url.searchParams.get('voice') || '';
-        const engine = (url.searchParams.get('engine') || 'deepgram').toLowerCase();
+        const engineParam = url.searchParams.get('engine');
+        const engine = (engineParam || (targetLang === 'fr' ? 'mistral' : 'deepgram')).toLowerCase();
 
         const reqContentType = request.headers.get('Content-Type') || 'audio/wav';
 

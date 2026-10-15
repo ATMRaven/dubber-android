@@ -79,7 +79,11 @@
     
     // Languages
     srcLang: localStorage.getItem(STORAGE_KEYS.SRC_LANG) || 'en-US',
-    tgtLang: localStorage.getItem(STORAGE_KEYS.TGT_LANG) || 'fr-FR',
+    tgtLang: (function() {
+      const saved = localStorage.getItem(STORAGE_KEYS.TGT_LANG);
+      const supported = ['fr-FR', 'en-US', 'es-ES', 'de-DE', 'ja-JP', 'it-IT', 'nl-NL'];
+      return (saved && supported.includes(saved)) ? saved : 'fr-FR';
+    })(),
 
     // Translation Engine & OpenRouter Settings
     apiKey: localStorage.getItem(STORAGE_KEYS.API_KEY) || '',
@@ -93,7 +97,7 @@
     customModel: localStorage.getItem(STORAGE_KEYS.CUSTOM_MODEL) || '',
 
     // TTS & Voice
-    ttsEngine: localStorage.getItem(STORAGE_KEYS.TTS_ENGINE) || 'deepgram',
+    ttsEngine: localStorage.getItem(STORAGE_KEYS.TTS_ENGINE) || 'mistral',
     mistralVoice: localStorage.getItem('dubber_mistral_voice') || 'fr_marie_happy',
     voiceUri: localStorage.getItem(STORAGE_KEYS.VOICE_URI) || '',
     voiceRate: parseFloat(localStorage.getItem(STORAGE_KEYS.VOICE_RATE)) || 1.10,
@@ -963,13 +967,31 @@
         const audioPlugin = getAudioCapturePlugin();
         if (isNativeAndroid() && audioPlugin) {
           showToast('Starting Android internal background dubbing engine...', 'info', 3000);
+          const tCode = (state.tgtLang || 'fr').split('-')[0].toLowerCase();
+          let chosenEngine = state.ttsEngine;
+          if (!chosenEngine) {
+            chosenEngine = (tCode === 'fr') ? 'mistral' : 'deepgram';
+          }
+          let chosenVoice = '';
+          if (chosenEngine === 'mistral') {
+            chosenVoice = state.mistralVoice || (tCode === 'fr' ? 'fr_marie_happy' : 'en_paul_happy');
+          } else {
+            const dgVoiceMap = {
+              fr: 'aura-2-agathe-fr',
+              de: 'aura-2-julius-de',
+              es: 'aura-2-alvaro-es',
+              ja: 'aura-2-ama-ja',
+              it: 'aura-2-elio-it',
+              nl: 'aura-2-lars-nl',
+              en: 'aura-2-thalia-en'
+            };
+            chosenVoice = dgVoiceMap[tCode] || (tCode === 'fr' ? 'fr_marie_happy' : 'aura-2-thalia-en');
+          }
           const captureOpts = {
             srcLang: state.srcLang || 'en',
             targetLang: state.tgtLang || 'fr',
-            voice: (state.ttsEngine === 'mistral')
-              ? (state.mistralVoice || 'fr_marie_happy')
-              : 'aura-2-agathe-fr',
-            engine: state.ttsEngine || 'deepgram'
+            voice: chosenVoice,
+            engine: chosenEngine
           };
           await audioPlugin.startScreenCapture(captureOpts);
           showToast('Background Dubber active! You can now switch to YouTube.', 'success', 5000);
@@ -2179,8 +2201,14 @@
     // Swap Languages
     elements.swapLangsBtn.addEventListener('click', () => {
       const currentSrc = elements.srcLangSelect.value;
-      elements.srcLangSelect.value = elements.tgtLangSelect.value;
-      elements.tgtLangSelect.value = currentSrc;
+      const currentTgt = elements.tgtLangSelect.value;
+      const isSrcSupportedTarget = Array.from(elements.tgtLangSelect.options).some(opt => opt.value === currentSrc);
+      if (isSrcSupportedTarget) {
+        elements.srcLangSelect.value = currentTgt;
+        elements.tgtLangSelect.value = currentSrc;
+      } else {
+        elements.srcLangSelect.value = currentTgt;
+      }
       saveSettingsFromDrawer();
       populateVoiceList();
     });
@@ -2197,6 +2225,20 @@
       localStorage.setItem(STORAGE_KEYS.TGT_LANG, state.tgtLang);
       elements.pillTgtBadge.textContent = state.tgtLang.slice(0, 2).toUpperCase();
       elements.labelTgtLang.textContent = getLanguageName(state.tgtLang);
+
+      // Default engine for French is Mistral Voxtral; for other supported languages, default to Deepgram Aura-2
+      const tCode = state.tgtLang.split('-')[0].toLowerCase();
+      if (tCode === 'fr') {
+        elements.ttsEngineSelect.value = 'mistral';
+        state.ttsEngine = 'mistral';
+        localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, 'mistral');
+        if (elements.mistralVoiceGroup) elements.mistralVoiceGroup.classList.remove('hidden');
+      } else if (elements.ttsEngineSelect.value === 'mistral') {
+        elements.ttsEngineSelect.value = 'deepgram';
+        state.ttsEngine = 'deepgram';
+        localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, 'deepgram');
+        if (elements.mistralVoiceGroup) elements.mistralVoiceGroup.classList.add('hidden');
+      }
       populateVoiceList();
     });
 
@@ -2345,9 +2387,9 @@
       elements.srcLangSelect.value = 'en-US';
       elements.tgtLangSelect.value = 'fr-FR';
       elements.modelSelect.value = 'groq-server';
-      elements.ttsEngineSelect.value = 'deepgram';
+      elements.ttsEngineSelect.value = 'mistral';
       if (elements.mistralVoiceSelect) elements.mistralVoiceSelect.value = 'fr_marie_happy';
-      if (elements.mistralVoiceGroup) elements.mistralVoiceGroup.classList.add('hidden');
+      if (elements.mistralVoiceGroup) elements.mistralVoiceGroup.classList.remove('hidden');
       elements.openRouterVoiceGroup.classList.add('hidden');
       elements.speechSynthVoiceGroup.classList.add('hidden');
       elements.voiceRateSlider.value = '1.1';

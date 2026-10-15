@@ -109,11 +109,11 @@ public class AudioCaptureService extends Service {
     private volatile boolean isPlayingDubbedAudio = false;
     private AudioFocusRequest nativeAudioFocusRequest = null;
 
-    // Dubbing pipeline settings (French default: Deepgram Aura-2 Agathe for natural studio narration)
+    // Dubbing pipeline settings (French default: Mistral Voxtral Marie)
     private String srcLang = "en";
     private String targetLang = "fr";
-    private String voice = "aura-2-agathe-fr";
-    private String engine = "deepgram";
+    private String voice = "fr_marie_happy";
+    private String engine = "mistral";
 
     @Override
     public void onCreate() {
@@ -160,10 +160,18 @@ public class AudioCaptureService extends Service {
                         try { systemTts.setLanguage(new java.util.Locale(targetLang)); } catch (Throwable ignored) {}
                     }
                 }
-                String v = intent.getStringExtra("voice");
-                if (v != null && !v.isEmpty()) voice = v;
                 String eng = intent.getStringExtra("engine");
-                if (eng != null && !eng.isEmpty()) engine = eng;
+                if (eng != null && !eng.isEmpty()) {
+                    engine = eng;
+                } else {
+                    engine = "fr".equalsIgnoreCase(targetLang) ? "mistral" : "deepgram";
+                }
+                String v = intent.getStringExtra("voice");
+                if (v != null && !v.isEmpty()) {
+                    voice = v;
+                } else {
+                    voice = "fr".equalsIgnoreCase(targetLang) ? "fr_marie_happy" : "aura-2-agathe-fr";
+                }
 
                 // Android requirement: startForeground must occur first
                 startForegroundNotification();
