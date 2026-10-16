@@ -91,7 +91,7 @@
             <polyline points="7 10 12 15 17 10"/>
             <line x1="12" y1="15" x2="12" y2="3"/>
           </svg>
-          Get APK (v1.4.1)
+          Get APK (v1.4.2)
         </a>
         <button type="button" class="btn btn-secondary btn-sm" id="headerSettingsBtn">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -142,7 +142,7 @@
           <div class="hero-select-box">
             <select id="heroTgtLangSelect" class="hero-select" aria-label="Target Dubbing Language">
               <option value="fr-FR" selected>🇫🇷 French (Marie)</option>
-              <option value="ar-SA">🇸🇦 Arabic (Sarah)</option>
+              <option value="ar-SA">🇸🇦 Arabic (Fahad)</option>
               <option value="en-US">🇺🇸 English (Paul)</option>
               <option value="es-ES">🇪🇸 Spanish (Alvaro)</option>
               <option value="de-DE">🇩🇪 German (Julius)</option>
@@ -540,12 +540,28 @@
             <select id="tgtLangSelect"><option value="fr-FR">French</option></select>
             <button type="button" id="swapLangsBtn"></button>
             <select id="ttsEngineSelect">
+              <option value="groq">Groq</option>
               <option value="mistral">Mistral</option>
               <option value="elevenlabs">ElevenLabs</option>
               <option value="deepgram">Deepgram</option>
               <option value="speechSynthesis">SpeechSynthesis</option>
               <option value="openrouter">OpenRouter</option>
             </select>
+            <div id="groqVoiceGroup">
+              <select id="groqVoiceSelect">
+                <option value="fahad">Fahad (Arabic)</option>
+                <option value="noura">Noura (Arabic)</option>
+                <option value="sultan">Sultan (Arabic)</option>
+                <option value="lulwa">Lulwa (Arabic)</option>
+                <option value="aisha">Aisha (Arabic)</option>
+                <option value="autumn">Autumn (English)</option>
+                <option value="daniel">Daniel (English)</option>
+                <option value="diana">Diana (English)</option>
+                <option value="hannah">Hannah (English)</option>
+                <option value="austin">Austin (English)</option>
+                <option value="troy">Troy (English)</option>
+              </select>
+            </div>
             <div id="mistralVoiceGroup">
               <select id="mistralVoiceSelect">
                 <option value="fr_marie_happy">fr_marie_happy</option>

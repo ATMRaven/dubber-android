@@ -165,7 +165,7 @@ public class AudioCaptureService extends Service {
                     engine = eng;
                 } else {
                     if ("ar".equalsIgnoreCase(targetLang)) {
-                        engine = "elevenlabs";
+                        engine = "groq";
                     } else if ("fr".equalsIgnoreCase(targetLang)) {
                         engine = "mistral";
                     } else {
@@ -177,7 +177,7 @@ public class AudioCaptureService extends Service {
                     voice = v;
                 } else {
                     if ("ar".equalsIgnoreCase(targetLang)) {
-                        voice = "EXAVITQu4vr4xnSDxMaL";
+                        voice = "fahad";
                     } else if ("fr".equalsIgnoreCase(targetLang)) {
                         voice = "fr_marie_happy";
                     } else {

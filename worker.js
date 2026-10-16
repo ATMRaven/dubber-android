@@ -23,8 +23,10 @@ export default {
         ai_enabled: !!env.AI,
         deepgram_enabled: !!env.DEEPGRAM_API_KEY,
         mistral_enabled: !!env.MISTRAL_API_KEY,
+        elevenlabs_enabled: !!env.ELEVENLABS_API_KEY,
         openrouter_enabled: !!env.OPENROUTER_API_KEY,
         groq_enabled: !!env.GROQ_API_KEY,
+        groq_tts_enabled: !!env.GROQ_API_KEY,
         timestamp: new Date().toISOString()
       }), {
         headers: {
@@ -222,12 +224,48 @@ export default {
           }
         }
 
-        // 3. Synthesize Speech (ElevenLabs for Arabic / Multilingual, Mistral Voxtral for FR/EN, Deepgram Aura-2)
+        // 3. Synthesize Speech (Groq Orpheus for Arabic/English, ElevenLabs for Arabic/Multilingual, Mistral Voxtral for FR/EN, Deepgram Aura-2)
         let audioBlob = null;
         let contentType = 'audio/mpeg';
 
-        // ElevenLabs Flash v2.5 synthesis (blazing-fast ~400ms for Arabic and high-fidelity output)
-        if ((engine === 'elevenlabs' || targetLang === 'ar') && env.ELEVENLABS_API_KEY) {
+        const groqKey = env.GROQ_API_KEY ? env.GROQ_API_KEY.trim().replace(/^["']|["']$/g, '') : null;
+
+        // Groq Canopy Orpheus synthesis (Default for Arabic, high-speed ~200ms speech synthesis for Arabic & English)
+        if ((engine === 'groq' || (targetLang === 'ar' && engine !== 'elevenlabs')) && groqKey) {
+          try {
+            const isArabic = targetLang === 'ar';
+            const groqModel = isArabic ? 'canopylabs/orpheus-arabic-saudi' : 'canopylabs/orpheus-v1-english';
+            let groqVoice = voice;
+            if (!groqVoice || groqVoice.startsWith('aura-') || groqVoice.startsWith('fr_') || groqVoice.length > 20) {
+              groqVoice = isArabic ? 'fahad' : 'autumn';
+            }
+            const groqRes = await fetch('https://api.groq.com/openai/v1/audio/speech', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${groqKey}`,
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+              },
+              body: JSON.stringify({
+                model: groqModel,
+                voice: groqVoice.toLowerCase(),
+                input: translatedText.trim(),
+                response_format: 'wav'
+              })
+            });
+            if (groqRes.ok) {
+              audioBlob = await groqRes.arrayBuffer();
+              contentType = 'audio/wav';
+            } else {
+              console.warn('Groq TTS error in /api/dub:', await groqRes.text());
+            }
+          } catch (groqErr) {
+            console.warn('Groq TTS fetch error in /api/dub:', groqErr);
+          }
+        }
+
+        // ElevenLabs Flash v2.5 synthesis (Explicit elevenlabs engine or Arabic fallback)
+        if (!audioBlob && (engine === 'elevenlabs' || targetLang === 'ar') && env.ELEVENLABS_API_KEY) {
           try {
             const elVoice = (voice && !voice.startsWith('aura-') && !voice.startsWith('fr_'))
               ? voice
@@ -249,6 +287,7 @@ export default {
             });
             if (elRes.ok) {
               audioBlob = await elRes.arrayBuffer();
+              contentType = 'audio/mpeg';
             } else {
               console.warn('ElevenLabs TTS error in /api/dub:', await elRes.text());
             }
@@ -367,10 +406,45 @@ export default {
           });
         }
 
-        // Voice mapping for Deepgram Aura-2
+        // Voice mapping for Deepgram Aura-2 & Arabic routing
         const tCode = targetLang.split('-')[0].toLowerCase();
+        const groqKey = env.GROQ_API_KEY ? env.GROQ_API_KEY.trim().replace(/^["']|["']$/g, '') : null;
+
+        if (tCode === 'ar' && groqKey) {
+          try {
+            const arVoice = (voiceModel && !voiceModel.startsWith('aura-') && voiceModel.length < 20) ? voiceModel.toLowerCase() : 'fahad';
+            const groqRes = await fetch('https://api.groq.com/openai/v1/audio/speech', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${groqKey}`,
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+              },
+              body: JSON.stringify({
+                model: 'canopylabs/orpheus-arabic-saudi',
+                voice: arVoice,
+                input: text.trim(),
+                response_format: 'wav'
+              })
+            });
+            if (groqRes.ok) {
+              const audioData = await groqRes.arrayBuffer();
+              return new Response(audioData, {
+                status: 200,
+                headers: {
+                  'Content-Type': 'audio/wav',
+                  'Access-Control-Allow-Origin': '*',
+                  'Cache-Control': 'public, max-age=86400'
+                }
+              });
+            }
+          } catch (arErr) {
+            console.warn('Groq Arabic TTS error in /api/deepgram/tts:', arErr);
+          }
+        }
+
         if (tCode === 'ar' && env.ELEVENLABS_API_KEY) {
-          // Seamless ElevenLabs route for Arabic
+          // Seamless ElevenLabs fallback for Arabic
           const elVoice = voiceModel || 'EXAVITQu4vr4xnSDxMaL';
           const elRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(elVoice)}?output_format=mp3_44100_128`, {
             method: 'POST',
@@ -397,7 +471,7 @@ export default {
           }
         }
         if (tCode === 'ar' && !voiceModel) {
-          return new Response(JSON.stringify({ error: 'Deepgram does not support Arabic Aura-2 voices yet. Please configure ElevenLabs or use SpeechSynthesis.' }), {
+          return new Response(JSON.stringify({ error: 'Deepgram does not support Arabic Aura-2 voices yet. Please configure Groq or ElevenLabs, or use SpeechSynthesis.' }), {
             status: 400,
             headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
           });
@@ -538,6 +612,96 @@ export default {
             'Content-Type': 'audio/mpeg',
             'Access-Control-Allow-Origin': '*',
             'Cache-Control': 'public, max-age=3600'
+          }
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+        });
+      }
+    }
+
+    // Groq Canopy Orpheus Ultra-Fast Neural TTS Endpoint (Arabic & English High-Speed Synthesis)
+    if (url.pathname === '/api/groq/tts') {
+      try {
+        let text = '';
+        let voiceId = '';
+        let modelId = '';
+
+        if (request.method === 'POST') {
+          const body = await request.json().catch(() => ({}));
+          text = body.text || '';
+          if (body.voice) voiceId = body.voice;
+          if (body.model) modelId = body.model;
+        } else {
+          text = url.searchParams.get('text') || '';
+          if (url.searchParams.get('voice')) voiceId = url.searchParams.get('voice');
+          if (url.searchParams.get('model')) modelId = url.searchParams.get('model');
+        }
+
+        if (!text || !text.trim()) {
+          return new Response(JSON.stringify({ error: 'Missing text' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        const groqKey = env.GROQ_API_KEY ? env.GROQ_API_KEY.trim().replace(/^["']|["']$/g, '') : null;
+        if (!groqKey) {
+          return new Response(JSON.stringify({ error: 'Groq API key not configured on server' }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        // Auto-detect language / model if not explicitly specified
+        const hasArabic = /[\u0600-\u06FF]/.test(text);
+        const arVoices = ['fahad', 'sultan', 'noura', 'lulwa', 'aisha'];
+        const isArVoice = voiceId && arVoices.includes(voiceId.toLowerCase());
+
+        if (!modelId) {
+          if (hasArabic || isArVoice) {
+            modelId = 'canopylabs/orpheus-arabic-saudi';
+          } else {
+            modelId = 'canopylabs/orpheus-v1-english';
+          }
+        }
+
+        if (!voiceId) {
+          voiceId = (modelId.includes('arabic') || hasArabic) ? 'fahad' : 'autumn';
+        }
+
+        const groqRes = await fetch('https://api.groq.com/openai/v1/audio/speech', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${groqKey}`,
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+          },
+          body: JSON.stringify({
+            model: modelId,
+            voice: voiceId.toLowerCase(),
+            input: text.trim(),
+            response_format: 'wav'
+          })
+        });
+
+        if (!groqRes.ok) {
+          const errText = await groqRes.text();
+          return new Response(errText, {
+            status: groqRes.status,
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        const audioBytes = await groqRes.arrayBuffer();
+        return new Response(audioBytes, {
+          status: 200,
+          headers: {
+            'Content-Type': 'audio/wav',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=86400'
           }
         });
       } catch (err) {

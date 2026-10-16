@@ -97,9 +97,17 @@
     customModel: localStorage.getItem(STORAGE_KEYS.CUSTOM_MODEL) || '',
 
     // TTS & Voice
-    ttsEngine: localStorage.getItem(STORAGE_KEYS.TTS_ENGINE) || 'mistral',
+    ttsEngine: (function() {
+      const saved = localStorage.getItem(STORAGE_KEYS.TTS_ENGINE);
+      const tgt = (localStorage.getItem(STORAGE_KEYS.TGT_LANG) || 'fr').split('-')[0].toLowerCase();
+      if (tgt === 'ar' && (!saved || saved === 'elevenlabs')) {
+        return 'groq';
+      }
+      return saved || 'mistral';
+    })(),
     mistralVoice: localStorage.getItem('dubber_mistral_voice') || 'fr_marie_happy',
     elevenlabsVoice: localStorage.getItem('dubber_elevenlabs_voice') || 'EXAVITQu4vr4xnSDxMaL',
+    groqVoice: localStorage.getItem('dubber_groq_voice') || 'fahad',
     voiceUri: localStorage.getItem(STORAGE_KEYS.VOICE_URI) || '',
     voiceRate: parseFloat(localStorage.getItem(STORAGE_KEYS.VOICE_RATE)) || 1.10,
     voicePitch: parseFloat(localStorage.getItem(STORAGE_KEYS.VOICE_PITCH)) || 1.00,
@@ -207,6 +215,8 @@
     customModelInput: document.getElementById('customModelInput'),
     testApiKeyBtn: document.getElementById('testApiKeyBtn'),
     ttsEngineSelect: document.getElementById('ttsEngineSelect'),
+    groqVoiceGroup: document.getElementById('groqVoiceGroup'),
+    groqVoiceSelect: document.getElementById('groqVoiceSelect'),
     mistralVoiceGroup: document.getElementById('mistralVoiceGroup'),
     mistralVoiceSelect: document.getElementById('mistralVoiceSelect'),
     elevenlabsVoiceGroup: document.getElementById('elevenlabsVoiceGroup'),
@@ -1021,11 +1031,13 @@
           const tCode = (state.tgtLang || 'fr').split('-')[0].toLowerCase();
           let chosenEngine = state.ttsEngine;
           if (!chosenEngine) {
-            chosenEngine = (tCode === 'fr') ? 'mistral' : (tCode === 'ar' ? 'elevenlabs' : 'deepgram');
+            chosenEngine = (tCode === 'ar') ? 'groq' : ((tCode === 'fr') ? 'mistral' : 'deepgram');
           }
           let chosenVoice = '';
-          if (chosenEngine === 'elevenlabs' || tCode === 'ar') {
-            chosenEngine = 'elevenlabs';
+          if (chosenEngine === 'groq' || (tCode === 'ar' && chosenEngine !== 'elevenlabs')) {
+            chosenEngine = 'groq';
+            chosenVoice = state.groqVoice || (tCode === 'ar' ? 'fahad' : 'autumn');
+          } else if (chosenEngine === 'elevenlabs') {
             chosenVoice = state.elevenlabsVoice || 'EXAVITQu4vr4xnSDxMaL';
           } else if (chosenEngine === 'mistral') {
             chosenVoice = state.mistralVoice || (tCode === 'fr' ? 'fr_marie_happy' : 'en_paul_happy');
@@ -1522,7 +1534,34 @@
   async function prefetchAudioBuffer(text) {
     const langPrefix = state.tgtLang.split('-')[0].toLowerCase();
 
-    // 0. ElevenLabs Flash v2.5 (Sub-second studio neural Arabic & Multilingual)
+    // 0. Groq Canopy Orpheus (Sub-second studio neural Arabic & English)
+    if (state.ttsEngine === 'groq' || (langPrefix === 'ar' && state.ttsEngine !== 'elevenlabs' && state.ttsEngine !== 'speechSynthesis')) {
+      try {
+        const groqUrl = 'https://dubber.atmr.workers.dev/api/groq/tts';
+        const isAr = langPrefix === 'ar';
+        const defaultVoice = isAr ? 'fahad' : 'autumn';
+        const defaultModel = isAr ? 'canopylabs/orpheus-arabic-saudi' : 'canopylabs/orpheus-v1-english';
+        const res = await fetch(groqUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: text,
+            voice: state.groqVoice || defaultVoice,
+            model: defaultModel
+          })
+        });
+        if (res.ok) {
+          const arrayBuffer = await res.arrayBuffer();
+          const ctx = initAudioContext();
+          if (ctx.state === 'suspended') await ctx.resume();
+          return await ctx.decodeAudioData(arrayBuffer);
+        }
+      } catch (err) {
+        console.warn('Groq TTS prefetch failed, will fallback:', err.message);
+      }
+    }
+
+    // 1. ElevenLabs Flash v2.5 (Sub-second studio neural Arabic & Multilingual)
     if (state.ttsEngine === 'elevenlabs' || langPrefix === 'ar') {
       try {
         const elUrl = 'https://dubber.atmr.workers.dev/api/elevenlabs/tts';
@@ -2139,10 +2178,10 @@
   function applyDefaultVoiceForTargetLanguage() {
     const tCode = state.tgtLang.split('-')[0].toLowerCase();
     if (tCode === 'ar') {
-      state.ttsEngine = 'elevenlabs';
-      state.elevenlabsVoice = 'EXAVITQu4vr4xnSDxMaL';
-      localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, 'elevenlabs');
-      localStorage.setItem('dubber_elevenlabs_voice', state.elevenlabsVoice);
+      state.ttsEngine = 'groq';
+      state.groqVoice = 'fahad';
+      localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, 'groq');
+      localStorage.setItem('dubber_groq_voice', state.groqVoice);
     } else if (tCode === 'fr') {
       state.ttsEngine = 'mistral';
       state.mistralVoice = 'fr_marie_happy';
@@ -2158,8 +2197,20 @@
       localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, 'deepgram');
     }
     if (elements.ttsEngineSelect) elements.ttsEngineSelect.value = state.ttsEngine;
+    if (elements.groqVoiceSelect) elements.groqVoiceSelect.value = state.groqVoice;
     if (elements.mistralVoiceSelect) elements.mistralVoiceSelect.value = state.mistralVoice;
     if (elements.elevenlabsVoiceSelect) elements.elevenlabsVoiceSelect.value = state.elevenlabsVoice;
+    if (elements.statEngineVal) {
+      elements.statEngineVal.textContent = state.ttsEngine === 'groq'
+        ? 'Groq Orpheus (AR/EN)'
+        : (state.ttsEngine === 'mistral'
+          ? 'Mistral Voxtral (FR/EN)'
+          : (state.ttsEngine === 'elevenlabs'
+            ? 'ElevenLabs Flash (AR)'
+            : (state.ttsEngine === 'deepgram' 
+              ? 'Deepgram Aura-2 (<200ms)' 
+              : (state.ttsEngine === 'speechSynthesis' ? 'SpeechSynth (Fast)' : 'OpenRouter TTS'))));
+    }
   }
 
   function populateCasualVoiceList() {
@@ -2177,7 +2228,12 @@
       ];
     } else if (tCode === 'ar') {
       options = [
-        { value: 'elevenlabs:EXAVITQu4vr4xnSDxMaL', label: 'Sarah — Clear & Fluent (Arabic ElevenLabs Flash) [Default]' },
+        { value: 'groq:fahad', label: 'Fahad — Natural & Articulate (Arabic Groq Orpheus) [Default]' },
+        { value: 'groq:noura', label: 'Noura — Clear & Expressive (Arabic Groq Orpheus)' },
+        { value: 'groq:sultan', label: 'Sultan — Deep & Authoritative (Arabic Groq Orpheus)' },
+        { value: 'groq:lulwa', label: 'Lulwa — Warm & Gentle (Arabic Groq Orpheus)' },
+        { value: 'groq:aisha', label: 'Aisha — Bright & Engaging (Arabic Groq Orpheus)' },
+        { value: 'elevenlabs:EXAVITQu4vr4xnSDxMaL', label: 'Sarah — Clear & Fluent (Arabic ElevenLabs Flash)' },
         { value: 'elevenlabs:nPczCjzI2devNBz1zQrb', label: 'Brian — Deep & Resonant (Arabic ElevenLabs Flash)' },
         { value: 'elevenlabs:JBFqnCBsd6RMkjVDRZzb', label: 'George — Warm Storyteller (Arabic ElevenLabs)' },
         { value: 'elevenlabs:pNInz6obpgDQGcFmaJgB', label: 'Adam — Confident Narrator (Arabic ElevenLabs)' },
@@ -2185,7 +2241,13 @@
       ];
     } else if (tCode === 'en') {
       options = [
-        { value: 'mistral:en_paul_happy', label: 'Paul — Warm & Friendly (English Mistral Voxtral) [Default]' },
+        { value: 'groq:autumn', label: 'Autumn — Expressive & Natural (English Groq Orpheus) [Recommended]' },
+        { value: 'groq:daniel', label: 'Daniel — Crisp & Resonant (English Groq Orpheus)' },
+        { value: 'groq:diana', label: 'Diana — Warm Storyteller (English Groq Orpheus)' },
+        { value: 'groq:hannah', label: 'Hannah — Casual & Friendly (English Groq Orpheus)' },
+        { value: 'groq:austin', label: 'Austin — Energetic & Dynamic (English Groq Orpheus)' },
+        { value: 'groq:troy', label: 'Troy — Confident & Direct (English Groq Orpheus)' },
+        { value: 'mistral:en_paul_happy', label: 'Paul — Warm & Friendly (English Mistral Voxtral)' },
         { value: 'mistral:gb_jane_confident', label: 'Jane — Crisp British (English Mistral Voxtral)' },
         { value: 'mistral:gb_oliver_confident', label: 'Oliver — Articulate British (English Mistral Voxtral)' },
         { value: 'elevenlabs:EXAVITQu4vr4xnSDxMaL', label: 'Sarah — Clear & Fluent (English ElevenLabs)' },
@@ -2225,7 +2287,9 @@
     }
 
     let currentVal = '';
-    if (state.ttsEngine === 'mistral') {
+    if (state.ttsEngine === 'groq') {
+      currentVal = `groq:${state.groqVoice}`;
+    } else if (state.ttsEngine === 'mistral') {
       currentVal = `mistral:${state.mistralVoice}`;
     } else if (state.ttsEngine === 'elevenlabs') {
       currentVal = `elevenlabs:${state.elevenlabsVoice}`;
@@ -2388,9 +2452,17 @@
     localStorage.setItem(STORAGE_KEYS.CUSTOM_MODEL, state.customModel);
 
     state.ttsEngine = elements.ttsEngineSelect.value;
+    if (elements.groqVoiceSelect) {
+      state.groqVoice = elements.groqVoiceSelect.value;
+      localStorage.setItem('dubber_groq_voice', state.groqVoice);
+    }
     if (elements.mistralVoiceSelect) {
       state.mistralVoice = elements.mistralVoiceSelect.value;
       localStorage.setItem('dubber_mistral_voice', state.mistralVoice);
+    }
+    if (elements.elevenlabsVoiceSelect) {
+      state.elevenlabsVoice = elements.elevenlabsVoiceSelect.value;
+      localStorage.setItem('dubber_elevenlabs_voice', state.elevenlabsVoice);
     }
     state.voiceUri = elements.voiceSelect.value;
     state.voiceRate = parseFloat(elements.voiceRateSlider.value);
@@ -2404,11 +2476,15 @@
     localStorage.setItem(STORAGE_KEYS.VOICE_RATE, state.voiceRate);
     localStorage.setItem(STORAGE_KEYS.VOICE_PITCH, state.voicePitch);
 
-    elements.statEngineVal.textContent = state.ttsEngine === 'mistral'
-      ? 'Mistral Voxtral (FR/EN)'
-      : (state.ttsEngine === 'deepgram' 
-        ? 'Deepgram Aura-2 (<200ms)' 
-        : (state.ttsEngine === 'speechSynthesis' ? 'SpeechSynth (Fast)' : 'OpenRouter TTS'));
+    elements.statEngineVal.textContent = state.ttsEngine === 'groq'
+      ? 'Groq Orpheus (AR/EN)'
+      : (state.ttsEngine === 'mistral'
+        ? 'Mistral Voxtral (FR/EN)'
+        : (state.ttsEngine === 'elevenlabs'
+          ? 'ElevenLabs Flash'
+          : (state.ttsEngine === 'deepgram' 
+            ? 'Deepgram Aura-2 (<200ms)' 
+            : (state.ttsEngine === 'speechSynthesis' ? 'SpeechSynth (Fast)' : 'OpenRouter TTS'))));
 
     // Ducking
     state.duckingEnabled = elements.duckingEnabledCheck.checked;
@@ -2571,7 +2647,11 @@
         localStorage.setItem(STORAGE_KEYS.TTS_ENGINE, engine);
         if (elements.ttsEngineSelect) elements.ttsEngineSelect.value = engine;
 
-        if (engine === 'mistral') {
+        if (engine === 'groq') {
+          state.groqVoice = voiceId;
+          localStorage.setItem('dubber_groq_voice', voiceId);
+          if (elements.groqVoiceSelect) elements.groqVoiceSelect.value = voiceId;
+        } else if (engine === 'mistral') {
           state.mistralVoice = voiceId;
           localStorage.setItem('dubber_mistral_voice', voiceId);
           if (elements.mistralVoiceSelect) elements.mistralVoiceSelect.value = voiceId;
@@ -2581,6 +2661,17 @@
           if (elements.elevenlabsVoiceSelect) elements.elevenlabsVoiceSelect.value = voiceId;
         } else if (engine === 'speechSynthesis') {
           state.voiceUri = '';
+        }
+        if (elements.statEngineVal) {
+          elements.statEngineVal.textContent = state.ttsEngine === 'groq'
+            ? 'Groq Orpheus (AR/EN)'
+            : (state.ttsEngine === 'mistral'
+              ? 'Mistral Voxtral (FR/EN)'
+              : (state.ttsEngine === 'elevenlabs'
+                ? 'ElevenLabs Flash (AR)'
+                : (state.ttsEngine === 'deepgram' 
+                  ? 'Deepgram Aura-2 (<200ms)' 
+                  : (state.ttsEngine === 'speechSynthesis' ? 'SpeechSynth (Fast)' : 'OpenRouter TTS'))));
         }
         showToast(`Selected Voice: ${elements.casualVoiceSelect.options[elements.casualVoiceSelect.selectedIndex].text.split('—')[0].trim()}`, 'info', 1800);
       });
@@ -2625,7 +2716,7 @@
       elements.labelTgtLang.textContent = getLanguageName(state.tgtLang);
 
       // Default engine routing:
-      // Arabic -> ElevenLabs (Flash v2.5)
+      // Arabic -> Groq Orpheus (fahad) [Default, ElevenLabs fallback]
       // French -> Mistral Voxtral (fr_marie_happy)
       // ES, DE, JA, IT, NL -> Deepgram Aura-2
       applyDefaultVoiceForTargetLanguage();
@@ -2651,6 +2742,9 @@
     // TTS Engine Select
     elements.ttsEngineSelect.addEventListener('change', () => {
       const eng = elements.ttsEngineSelect.value;
+      if (elements.groqVoiceGroup) {
+        elements.groqVoiceGroup.classList.toggle('hidden', eng !== 'groq');
+      }
       if (elements.mistralVoiceGroup) {
         elements.mistralVoiceGroup.classList.toggle('hidden', eng !== 'mistral');
       }
@@ -2660,6 +2754,13 @@
       elements.openRouterVoiceGroup.classList.toggle('hidden', eng !== 'openrouter');
       elements.speechSynthVoiceGroup.classList.toggle('hidden', eng !== 'speechSynthesis');
     });
+
+    if (elements.groqVoiceSelect) {
+      elements.groqVoiceSelect.addEventListener('change', () => {
+        state.groqVoice = elements.groqVoiceSelect.value;
+        localStorage.setItem('dubber_groq_voice', state.groqVoice);
+      });
+    }
 
     if (elements.elevenlabsVoiceSelect) {
       elements.elevenlabsVoiceSelect.addEventListener('change', () => {
@@ -2790,6 +2891,7 @@
       elements.modelSelect.value = 'groq-server';
       elements.ttsEngineSelect.value = 'mistral';
       if (elements.mistralVoiceSelect) elements.mistralVoiceSelect.value = 'fr_marie_happy';
+      if (elements.groqVoiceGroup) elements.groqVoiceGroup.classList.add('hidden');
       if (elements.mistralVoiceGroup) elements.mistralVoiceGroup.classList.remove('hidden');
       elements.openRouterVoiceGroup.classList.add('hidden');
       elements.speechSynthVoiceGroup.classList.add('hidden');
@@ -2950,6 +3052,12 @@
     }
 
     elements.ttsEngineSelect.value = state.ttsEngine;
+    if (elements.groqVoiceSelect) {
+      elements.groqVoiceSelect.value = state.groqVoice;
+    }
+    if (elements.groqVoiceGroup) {
+      elements.groqVoiceGroup.classList.toggle('hidden', state.ttsEngine !== 'groq');
+    }
     if (elements.mistralVoiceSelect) {
       elements.mistralVoiceSelect.value = state.mistralVoice;
     }
@@ -2994,11 +3102,15 @@
     }
 
     elements.statSource.innerHTML = `Source: <strong>${state.captureSource === 'display' ? 'Screen/Tab' : 'Mic'}</strong>`;
-    elements.statEngineVal.textContent = state.ttsEngine === 'mistral'
-      ? 'Mistral Voxtral (FR/EN)'
-      : (state.ttsEngine === 'deepgram' 
-        ? 'Deepgram Aura-2 (<200ms)' 
-        : (state.ttsEngine === 'speechSynthesis' ? 'SpeechSynth (Fast)' : 'OpenRouter TTS'));
+    elements.statEngineVal.textContent = state.ttsEngine === 'groq'
+      ? 'Groq Orpheus (AR/EN)'
+      : (state.ttsEngine === 'mistral'
+        ? 'Mistral Voxtral (FR/EN)'
+        : (state.ttsEngine === 'elevenlabs'
+          ? 'ElevenLabs Flash (AR)'
+          : (state.ttsEngine === 'deepgram' 
+            ? 'Deepgram Aura-2 (<200ms)' 
+            : (state.ttsEngine === 'speechSynthesis' ? 'SpeechSynth (Fast)' : 'OpenRouter TTS'))));
     elements.statDuckingVal.textContent = state.duckingEnabled ? `Active (${state.duckingDepth}%)` : 'Disabled';
 
     populateCasualVoiceList();
