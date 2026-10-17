@@ -322,20 +322,25 @@
           <canvas id="lookaheadVideoCanvas" class="lookahead-canvas" style="display:none;"></canvas>
           <video id="capturedVideoElement" autoplay playsinline muted style="display:none;"></video>
           <div id="lookaheadBadge" class="lookahead-badge" style="display:none;">
-            <span class="badge-dot"></span> <span id="lookaheadBadgeText">Lookahead Lip-Sync: 2.5s Delay</span>
+            <span class="badge-dot"></span> <span id="lookaheadBadgeText">⚡ Lookahead Buffer: Ready</span>
           </div>
         </div>
 
-        <div class="lookahead-sync-bar">
+        <div class="lookahead-sync-bar" id="lookaheadSyncBar">
           <div class="sync-toggle-wrap">
-            <label class="checkbox-label">
-              <input type="checkbox" id="lookaheadSyncToggle">
-              <span><strong>Lookahead Lip-Sync Mode</strong> (Delays video 2–3s so translated dub speaks in sync with lips)</span>
-            </label>
+            <div id="lookaheadPipelineStatus" class="lookahead-pipeline-status">
+              <span class="badge-dot" id="lookaheadStatusDot" style="background: #10b981;"></span>
+              <span id="lookaheadPipelineText">⚡ <strong>Zero-Latency Lookahead Engine:</strong> Pre-fetches YouTube InnerTube captions & lookahead TTS buffer (0s STT lag)</span>
+            </div>
           </div>
-          <div class="sync-slider-wrap" id="syncSliderGroup" style="display:none;">
-            <span class="sync-slider-label">Delay: <strong id="lookaheadDelayVal">2.5s</strong></span>
-            <input type="range" id="lookaheadDelaySlider" min="1.5" max="5.0" step="0.5" value="2.5" class="form-range sync-range">
+          <div class="buffer-progress-wrap" id="bufferProgressGroup" style="display:none;">
+            <div class="buffer-progress-header">
+              <span class="buffer-label">Audio Buffer:</span>
+              <strong id="bufferProgressVal">0 chunks</strong>
+            </div>
+            <div class="buffer-progress-bar-bg">
+              <div id="bufferProgressBar" class="buffer-progress-bar-fill" style="width: 0%;"></div>
+            </div>
           </div>
         </div>
 
@@ -620,6 +625,7 @@
   <audio id="demoAudioPlayer" preload="none"></audio>
 
   <!-- Application Script -->
+  <script src="https://www.youtube.com/iframe_api"></script>
   <script src="app.js"></script>
 </body>
 </html>

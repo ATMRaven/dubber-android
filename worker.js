@@ -786,6 +786,261 @@ export default {
       }
     }
 
+    // =========================================================================
+    // InnerTube YouTube Transcript Pre-Fetch & Chunk Merging API
+    // =========================================================================
+    if (url.pathname === '/api/youtube/transcript') {
+      try {
+        let videoId = '';
+        let srcLang = 'en';
+
+        if (request.method === 'POST') {
+          const body = await request.json().catch(() => ({}));
+          videoId = body.videoId || body.url || '';
+          srcLang = body.srcLang || body.source || srcLang;
+        } else {
+          videoId = url.searchParams.get('videoId') || url.searchParams.get('v') || url.searchParams.get('url') || '';
+          srcLang = url.searchParams.get('srcLang') || url.searchParams.get('source') || srcLang;
+        }
+
+        // Clean videoId
+        const match = videoId.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
+        if (match && match[1]) {
+          videoId = match[1];
+        } else {
+          videoId = videoId.trim();
+        }
+
+        if (!videoId || videoId.length < 5) {
+          return new Response(JSON.stringify({ error: 'Missing or invalid videoId', hasCaptions: false }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        srcLang = srcLang.split('-')[0].toLowerCase();
+
+        // 1. Fetch player response using InnerTube API (WEB client first as specified)
+        let captionTracks = [];
+        let playerJson = null;
+
+        const webPayload = {
+          context: {
+            client: {
+              hl: 'en',
+              gl: 'US',
+              clientName: 'WEB',
+              clientVersion: '2.20250101.00.00'
+            }
+          },
+          videoId: videoId
+        };
+
+        try {
+          const ytRes = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+            },
+            body: JSON.stringify(webPayload)
+          });
+          if (ytRes.ok) {
+            playerJson = await ytRes.json();
+            captionTracks = playerJson?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+          }
+        } catch (webErr) {
+          console.warn('InnerTube WEB client failed:', webErr.message);
+        }
+
+        // 1b. If no tracks found, fallback to Android VR client spoofing
+        if (!captionTracks || captionTracks.length === 0) {
+          try {
+            const androidPayload = {
+              context: {
+                client: {
+                  clientName: 'ANDROID_VR',
+                  clientVersion: '1.60.19',
+                  deviceMake: 'Oculus',
+                  deviceModel: 'Quest 3',
+                  osName: 'Android',
+                  osVersion: '12',
+                  hl: 'en',
+                  gl: 'US'
+                }
+              },
+              videoId: videoId
+            };
+            const ytAndroidRes = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+              },
+              body: JSON.stringify(androidPayload)
+            });
+            if (ytAndroidRes.ok) {
+              const aJson = await ytAndroidRes.json();
+              captionTracks = aJson?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+            }
+          } catch (aErr) {
+            console.warn('InnerTube Android client failed:', aErr.message);
+          }
+        }
+
+        // 1c. If still no tracks, fallback to watch page HTML ytInitialPlayerResponse
+        if (!captionTracks || captionTracks.length === 0) {
+          try {
+            const watchRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9'
+              }
+            });
+            if (watchRes.ok) {
+              const html = await watchRes.text();
+              const match = html.match(/ytInitialPlayerResponse\s*=\s*({.+?});(?:var\s|const\s|let\s|<\/script>)/);
+              if (match && match[1]) {
+                const wJson = JSON.parse(match[1]);
+                captionTracks = wJson?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+              }
+            }
+          } catch (wErr) {
+            console.warn('Watch page caption parsing failed:', wErr.message);
+          }
+        }
+
+        // If no caption tracks at all (e.g. live stream or captions disabled) -> Fallback mode!
+        if (!captionTracks || captionTracks.length === 0) {
+          return new Response(JSON.stringify({
+            hasCaptions: false,
+            videoId: videoId,
+            message: 'No captions available on this video. Fallback to real-time STT required.',
+            captionTracks: [],
+            mergedChunks: []
+          }), {
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        // 2. Select primary language track (prefer manual captions over kind === "asr")
+        let selectedTrack = captionTracks.find(t => t.languageCode?.toLowerCase().startsWith(srcLang) && t.kind !== 'asr');
+        if (!selectedTrack) {
+          selectedTrack = captionTracks.find(t => t.languageCode?.toLowerCase().startsWith(srcLang));
+        }
+        if (!selectedTrack) {
+          selectedTrack = captionTracks.find(t => t.languageCode?.toLowerCase().startsWith('en') && t.kind !== 'asr');
+        }
+        if (!selectedTrack) {
+          selectedTrack = captionTracks.find(t => t.kind !== 'asr');
+        }
+        if (!selectedTrack) {
+          selectedTrack = captionTracks[0];
+        }
+
+        const baseUrl = selectedTrack.baseUrl;
+        if (!baseUrl) {
+          return new Response(JSON.stringify({
+            hasCaptions: false,
+            videoId: videoId,
+            message: 'Caption track baseUrl is empty.',
+            captionTracks: [],
+            mergedChunks: []
+          }), {
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        // 3. Append &fmt=json3 to baseUrl and fetch structured transcript JSON
+        const json3Url = baseUrl.includes('fmt=')
+          ? baseUrl.replace(/fmt=[^&]+/, 'fmt=json3')
+          : `${baseUrl}&fmt=json3`;
+
+        const transcriptRes = await fetch(json3Url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          }
+        });
+
+        if (!transcriptRes.ok) {
+          return new Response(JSON.stringify({
+            hasCaptions: false,
+            videoId: videoId,
+            message: `Transcript fetch returned HTTP ${transcriptRes.status}`,
+            captionTracks: [],
+            mergedChunks: []
+          }), {
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        const transcriptJson = await transcriptRes.json().catch(() => null);
+        const events = transcriptJson?.events || [];
+
+        // 4. Parse events array into clean array of segments:
+        // { startMs: event.tStartMs, durationMs: event.dDurationMs, text: <concatenated segs.utf8> }
+        const rawSegments = [];
+        for (const ev of events) {
+          if (!ev.segs || !Array.isArray(ev.segs)) continue;
+          let text = ev.segs.map(s => s.utf8 || '').join('').trim();
+          text = text.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+          if (!text || text === '\n') continue;
+          const cleanedText = text.replace(/^[♪♫\s]+|[♪♫\s]+$/g, '').trim();
+          if (!cleanedText) continue;
+
+          rawSegments.push({
+            startMs: parseInt(ev.tStartMs || 0, 10),
+            durationMs: parseInt(ev.dDurationMs || 0, 10),
+            text: cleanedText
+          });
+        }
+
+        if (rawSegments.length === 0) {
+          return new Response(JSON.stringify({
+            hasCaptions: false,
+            videoId: videoId,
+            message: 'No transcript dialogue events parsed.',
+            captionTracks: [],
+            mergedChunks: []
+          }), {
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        // 5. Sentence Merging & Normalization (targeting 3–8s per chunk, breath groups, startMs & endMs)
+        const mergedChunks = mergeSegments(rawSegments, 3000, 8000, 1200);
+
+        return new Response(JSON.stringify({
+          hasCaptions: true,
+          videoId: videoId,
+          selectedTrack: {
+            languageCode: selectedTrack.languageCode,
+            kind: selectedTrack.kind || 'manual',
+            name: selectedTrack.name?.simpleText || selectedTrack.languageCode
+          },
+          captionTracksCount: captionTracks.length,
+          rawSegmentsCount: rawSegments.length,
+          mergedChunksCount: mergedChunks.length,
+          mergedChunks: mergedChunks
+        }), {
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+
+      } catch (err) {
+        return new Response(JSON.stringify({
+          hasCaptions: false,
+          error: err.message,
+          mergedChunks: []
+        }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+        });
+      }
+    }
+
     // Fast AI Translation endpoint (Integrated OpenRouter + Cloudflare Edge AI fallback)
     if (url.pathname === '/api/translate') {
       try {
@@ -794,8 +1049,97 @@ export default {
         let target = 'fr';
         let model = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free';
 
+        const langNames = {
+          en: 'English', fr: 'French', ar: 'Arabic', es: 'Spanish',
+          de: 'German', ja: 'Japanese', zh: 'Chinese', ko: 'Korean',
+          ru: 'Russian', it: 'Italian', pt: 'Portuguese', hi: 'Hindi',
+          tr: 'Turkish', nl: 'Dutch', pl: 'Polish', id: 'Indonesian', vi: 'Vietnamese'
+        };
+
         if (request.method === 'POST') {
           const body = await request.json().catch(() => ({}));
+
+          // Batch translation of transcript chunks
+          if (body.chunks && Array.isArray(body.chunks) && body.chunks.length > 0) {
+            const chunks = body.chunks;
+            source = (body.source || 'en').split('-')[0].toLowerCase();
+            target = (body.target || 'fr').split('-')[0].toLowerCase();
+            const sName = langNames[source] || source;
+            const tName = langNames[target] || target;
+
+            if (source === target) {
+              const direct = chunks.map(c => ({ id: c.id, translatedText: c.text }));
+              return new Response(JSON.stringify({ success: true, translations: direct, provider: 'identity' }), {
+                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+              });
+            }
+
+            if (env.GROQ_API_KEY) {
+              try {
+                const systemPrompt = `You are an expert film and video dubbing translator. Translate the following timestamped dialogue chunks from ${sName} into natural, concise spoken ${tName}.\nCRITICAL RULES:\n1. Match the spoken duration of the original chunk closely so it fits the audio window without rushing or dragging.\n2. Output STRICTLY a valid JSON array of objects with the exact schema: [{"id": string, "translatedText": string}].\n3. Preserve the exact chunk IDs.\n4. Do NOT output markdown code blocks, comments, or explanations.`;
+                const promptPayload = chunks.map(c => ({
+                  id: c.id,
+                  text: c.text,
+                  durationSec: Math.round((c.durationMs || 4000) / 100) / 10
+                }));
+
+                const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': `Bearer ${env.GROQ_API_KEY}`,
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                  },
+                  body: JSON.stringify({
+                    model: 'qwen/qwen3.8-27b',
+                    messages: [
+                      { role: 'system', content: systemPrompt },
+                      { role: 'user', content: JSON.stringify(promptPayload) }
+                    ],
+                    temperature: 0.2,
+                    max_tokens: 1500
+                  })
+                });
+
+                if (groqRes.ok) {
+                  const groqData = await groqRes.json();
+                  const rawContent = groqData?.choices?.[0]?.message?.content || '';
+                  const cleanedJson = rawContent
+                    .replace(/^```json\s*/i, '')
+                    .replace(/^```\s*/i, '')
+                    .replace(/\s*```$/i, '')
+                    .trim();
+
+                  try {
+                    const parsed = JSON.parse(cleanedJson);
+                    if (Array.isArray(parsed) && parsed.length > 0) {
+                      return new Response(JSON.stringify({
+                        success: true,
+                        translations: parsed,
+                        provider: 'groq-batch (qwen/qwen3.8-27b)'
+                      }), {
+                        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+                      });
+                    }
+                  } catch (pErr) {
+                    console.warn('Batch JSON parse error:', pErr.message);
+                  }
+                }
+              } catch (groqErr) {
+                console.warn('Groq batch translation error:', groqErr.message);
+              }
+            }
+
+            // Fallback for batch
+            return new Response(JSON.stringify({
+              success: true,
+              translations: chunks.map(c => ({ id: c.id, translatedText: c.text })),
+              provider: 'identity-fallback'
+            }), {
+              headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+            });
+          }
+
           text = body.text || '';
           source = (body.source || 'en').split('-')[0].toLowerCase();
           target = (body.target || 'fr').split('-')[0].toLowerCase();
@@ -816,12 +1160,6 @@ export default {
           });
         }
 
-        const langNames = {
-          en: 'English', fr: 'French', ar: 'Arabic', es: 'Spanish',
-          de: 'German', ja: 'Japanese', zh: 'Chinese', ko: 'Korean',
-          ru: 'Russian', it: 'Italian', pt: 'Portuguese', hi: 'Hindi',
-          tr: 'Turkish', nl: 'Dutch', pl: 'Polish', id: 'Indonesian', vi: 'Vietnamese'
-        };
         const sName = langNames[source] || source;
         const tName = langNames[target] || target;
 
@@ -1030,3 +1368,78 @@ export default {
     return new Response('Dubber edge endpoint active', { status: 200 });
   }
 };
+
+/**
+ * Sentence Merging & Normalization
+ * Combines short fragmented caption events into cohesive 3-8s breath/thought groups
+ */
+function mergeSegments(segments, minDurationMs = 3000, maxDurationMs = 8000, maxGapMs = 1200) {
+  if (!segments || segments.length === 0) return [];
+
+  const chunks = [];
+  let current = null;
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const segStart = seg.startMs;
+    const segDur = seg.durationMs;
+    const segEnd = segStart + segDur;
+    const segText = seg.text.trim();
+    if (!segText) continue;
+
+    if (!current) {
+      current = {
+        startMs: segStart,
+        endMs: segEnd,
+        text: segText,
+        segCount: 1
+      };
+      continue;
+    }
+
+    const currentDuration = current.endMs - current.startMs;
+    const gapMs = segStart - current.endMs;
+    const endsWithPunct = /[.!?؟]$/.test(current.text);
+
+    let shouldClose = false;
+    if (gapMs >= maxGapMs) {
+      shouldClose = true;
+    } else if (currentDuration >= minDurationMs && endsWithPunct) {
+      shouldClose = true;
+    } else if (currentDuration + segDur > maxDurationMs && currentDuration >= minDurationMs) {
+      shouldClose = true;
+    }
+
+    if (shouldClose) {
+      current.durationMs = current.endMs - current.startMs;
+      chunks.push(current);
+      current = {
+        startMs: segStart,
+        endMs: segEnd,
+        text: segText,
+        segCount: 1
+      };
+    } else {
+      current.text = `${current.text} ${segText}`.replace(/\s+/g, ' ').trim();
+      current.endMs = segEnd;
+      current.segCount++;
+    }
+  }
+
+  if (current) {
+    current.durationMs = current.endMs - current.startMs;
+    chunks.push(current);
+  }
+
+  // Calculate targetDurationMs = nextChunk.startMs - currentChunk.startMs
+  for (let i = 0; i < chunks.length; i++) {
+    chunks[i].id = `chunk_${i}`;
+    if (i < chunks.length - 1) {
+      chunks[i].targetDurationMs = chunks[i + 1].startMs - chunks[i].startMs;
+    } else {
+      chunks[i].targetDurationMs = chunks[i].durationMs;
+    }
+  }
+
+  return chunks;
+}

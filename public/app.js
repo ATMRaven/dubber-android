@@ -63,6 +63,13 @@
     return !!(navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function');
   };
 
+  const getEdgeBaseUrl = () => {
+    if (window.location && window.location.origin && window.location.origin.includes('workers.dev')) {
+      return window.location.origin;
+    }
+    return 'https://dubber.atmr.workers.dev';
+  };
+
   const state = {
     isDubbing: false,
     status: 'idle', // 'idle' | 'listening' | 'translating' | 'dubbing' | 'error'
@@ -76,6 +83,7 @@
     lookaheadSyncEnabled: localStorage.getItem(STORAGE_KEYS.LOOKAHEAD_SYNC_ENABLED) === 'true',
     lookaheadDelay: parseFloat(localStorage.getItem(STORAGE_KEYS.LOOKAHEAD_DELAY)) || 2.5,
     screenDelayNode: null,
+    dubbingPipeline: 'lookahead', // 'lookahead' (YouTube InnerTube + TTS lookahead buffer) | 'reactive_stt' (Fallback)
     
     // Languages
     srcLang: localStorage.getItem(STORAGE_KEYS.SRC_LANG) || 'en-US',
@@ -182,6 +190,14 @@
     youtubePlayer: document.getElementById('youtubePlayer'),
     youtubeUrlInput: document.getElementById('youtubeUrlInput'),
     loadYoutubeBtn: document.getElementById('loadYoutubeBtn'),
+    desktopTestbenchDetails: document.getElementById('desktopTestbenchDetails'),
+    lookaheadSyncBar: document.getElementById('lookaheadSyncBar'),
+    lookaheadPipelineStatus: document.getElementById('lookaheadPipelineStatus'),
+    lookaheadPipelineText: document.getElementById('lookaheadPipelineText'),
+    lookaheadStatusDot: document.getElementById('lookaheadStatusDot'),
+    bufferProgressGroup: document.getElementById('bufferProgressGroup'),
+    bufferProgressVal: document.getElementById('bufferProgressVal'),
+    bufferProgressBar: document.getElementById('bufferProgressBar'),
     lookaheadSyncToggle: document.getElementById('lookaheadSyncToggle'),
     syncSliderGroup: document.getElementById('syncSliderGroup'),
     lookaheadDelaySlider: document.getElementById('lookaheadDelaySlider'),
@@ -877,96 +893,619 @@
   }
 
   // =========================================================================
-  // 5B. LOOKAHEAD LIP-SYNC VIDEO DELAY ENGINE
+  // 5B. YOUTUBE INNERTUBE PRE-FETCH & ZERO-LATENCY LOOKAHEAD DUBBING ENGINE
   // =========================================================================
 
+  const lookaheadDubber = {
+    active: false,
+    videoId: null,
+    chunks: [], // Array of merged chunks { id, startMs, endMs, durationMs, targetDurationMs, text }
+    chunkMap: new Map(), // startMs -> chunk
+    audioCache: new Map(), // startMs -> { audio, blobUrl, audioBuffer, durationMs, chunk }
+    translatedChunks: new Map(), // chunkId -> translatedText
+    inFlightTranslations: new Set(), // chunkId
+    inFlightTTS: new Set(), // startMs
+    playedChunkIds: new Set(), // chunkId
+    pollTimer: null,
+    lastCurrentTimeMs: 0,
+    abortController: new AbortController(),
+    currentAudioEl: null,
+    currentChunkPlaying: null
+  };
+
+  let ytPlayer = null;
+  let isYtApiReady = false;
+
+  // YouTube IFrame API Global Callback
+  window.onYouTubeIframeAPIReady = function() {
+    isYtApiReady = true;
+    initYouTubePlayerInstance();
+  };
+
+  function initYouTubePlayerInstance() {
+    if (!window.YT || !window.YT.Player) return;
+    try {
+      ytPlayer = new window.YT.Player('youtubePlayer', {
+        events: {
+          'onReady': () => {
+            console.info('[Dubber] YouTube IFrame Player Ready.');
+            const initialUrl = elements.youtubeUrlInput ? elements.youtubeUrlInput.value.trim() : '';
+            if (initialUrl) {
+              loadYouTubeVideo(initialUrl);
+            }
+          },
+          'onStateChange': (event) => {
+            // Paused (2)
+            if (event.data === 2 && lookaheadDubber.currentAudioEl) {
+              try { lookaheadDubber.currentAudioEl.pause(); } catch (e) {}
+            }
+            // Playing (1)
+            if (event.data === 1 && lookaheadDubber.currentAudioEl && lookaheadDubber.currentAudioEl.paused) {
+              try { lookaheadDubber.currentAudioEl.play(); } catch (e) {}
+            }
+          }
+        }
+      });
+    } catch (err) {
+      console.warn('[Dubber] YT.Player init warning, using postMessage fallback:', err.message);
+    }
+  }
+
+  function getYouTubeCurrentTimeMs() {
+    if (ytPlayer && typeof ytPlayer.getCurrentTime === 'function') {
+      try {
+        const sec = ytPlayer.getCurrentTime();
+        if (typeof sec === 'number' && !isNaN(sec)) {
+          return Math.round(sec * 1000);
+        }
+      } catch (e) {}
+    }
+    return 0;
+  }
+
+  function getYouTubePlayerState() {
+    if (ytPlayer && typeof ytPlayer.getPlayerState === 'function') {
+      try {
+        return ytPlayer.getPlayerState();
+      } catch (e) {}
+    }
+    return -1;
+  }
+
+  function setYouTubeVolume(volPercent) {
+    if (ytPlayer && typeof ytPlayer.setVolume === 'function') {
+      try {
+        ytPlayer.setVolume(volPercent);
+        if (volPercent === 0) ytPlayer.mute();
+        else if (ytPlayer.isMuted()) ytPlayer.unMute();
+      } catch (e) {}
+    } else if (elements.youtubePlayer && elements.youtubePlayer.contentWindow) {
+      elements.youtubePlayer.contentWindow.postMessage(JSON.stringify({
+        event: 'command',
+        func: volPercent === 0 ? 'mute' : 'setVolume',
+        args: volPercent === 0 ? [] : [volPercent]
+      }), '*');
+    }
+  }
+
+  function playYouTubeVideo() {
+    if (ytPlayer && typeof ytPlayer.playVideo === 'function') {
+      try { ytPlayer.playVideo(); } catch (e) {}
+    } else if (elements.youtubePlayer && elements.youtubePlayer.contentWindow) {
+      elements.youtubePlayer.contentWindow.postMessage(JSON.stringify({
+        event: 'command',
+        func: 'playVideo',
+        args: []
+      }), '*');
+    }
+  }
+
+  function pauseYouTubeVideo() {
+    if (ytPlayer && typeof ytPlayer.pauseVideo === 'function') {
+      try { ytPlayer.pauseVideo(); } catch (e) {}
+    } else if (elements.youtubePlayer && elements.youtubePlayer.contentWindow) {
+      elements.youtubePlayer.contentWindow.postMessage(JSON.stringify({
+        event: 'command',
+        func: 'pauseVideo',
+        args: []
+      }), '*');
+    }
+  }
+
+  function formatTimeMs(ms) {
+    const totalSec = Math.floor(ms / 1000);
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  }
+
+  /**
+   * 1. Transcript Extraction (InnerTube API)
+   * Fetches the timestamped transcript before playback begins
+   */
+  async function fetchYouTubeTranscript(videoIdOrUrl, srcLang = 'en') {
+    let videoId = videoIdOrUrl.trim();
+    const match = videoId.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
+    if (match && match[1]) {
+      videoId = match[1];
+    }
+
+    const sLang = (srcLang || 'en').split('-')[0].toLowerCase();
+    const edgeUrl = `${getEdgeBaseUrl()}/api/youtube/transcript?videoId=${encodeURIComponent(videoId)}&srcLang=${sLang}`;
+
+    try {
+      const res = await fetch(edgeUrl, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' }
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        return data;
+      }
+    } catch (err) {
+      console.warn('Transcript fetch from edge failed:', err.message);
+    }
+
+    return { hasCaptions: false, message: 'Edge connection failed' };
+  }
+
+  /**
+   * 2. Sentence Merging & Initial Buffer Loading
+   */
+  async function loadYouTubeVideo(inputUrlOrId) {
+    let url = (inputUrlOrId || (elements.youtubeUrlInput ? elements.youtubeUrlInput.value : '')).trim();
+    if (!url) return;
+
+    let videoId = url;
+    const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
+    if (match && match[1]) {
+      videoId = match[1];
+    } else {
+      const idMatch = url.match(/^[\w-]{11}$/);
+      if (idMatch) videoId = idMatch[0];
+    }
+
+    if (lookaheadDubber.active && lookaheadDubber.videoId === videoId) {
+      return;
+    }
+
+    // Open video testbench if collapsed
+    if (elements.desktopTestbenchDetails && !elements.desktopTestbenchDetails.open) {
+      elements.desktopTestbenchDetails.open = true;
+    }
+
+    // Load video in iframe
+    const embedUrl = `https://www.youtube-nocookie.com/embed/${videoId}?enablejsapi=1&autoplay=1&origin=${encodeURIComponent(window.location.origin)}`;
+    if (elements.youtubePlayer) {
+      elements.youtubePlayer.src = embedUrl;
+    }
+    if (ytPlayer && typeof ytPlayer.loadVideoById === 'function') {
+      try { ytPlayer.loadVideoById(videoId); } catch (e) {}
+    }
+
+    showToast(`Loading YouTube video [${videoId}]...`, 'info');
+    updateTicker(`Fetching YouTube transcript for ${videoId}...`, 'translating');
+
+    await initYouTubeLookahead(videoId);
+  }
+
+  async function initYouTubeLookahead(videoId) {
+    // Reset previous lookahead state
+    try { lookaheadDubber.abortController.abort(); } catch (e) {}
+    lookaheadDubber.abortController = new AbortController();
+    lookaheadDubber.active = false;
+    lookaheadDubber.videoId = videoId;
+    lookaheadDubber.chunks = [];
+    lookaheadDubber.chunkMap.clear();
+    lookaheadDubber.audioCache.clear();
+    lookaheadDubber.translatedChunks.clear();
+    lookaheadDubber.inFlightTranslations.clear();
+    lookaheadDubber.inFlightTTS.clear();
+    lookaheadDubber.playedChunkIds.clear();
+    lookaheadDubber.lastCurrentTimeMs = 0;
+
+    if (elements.lookaheadBadge) {
+      elements.lookaheadBadge.style.display = 'flex';
+      elements.lookaheadBadge.style.borderColor = 'rgba(59, 130, 246, 0.4)';
+      elements.lookaheadBadge.style.color = '#60a5fa';
+      if (elements.lookaheadBadgeText) {
+        elements.lookaheadBadgeText.textContent = '⚡ Fetching InnerTube Transcript...';
+      }
+    }
+    if (elements.bufferProgressGroup) {
+      elements.bufferProgressGroup.style.display = 'flex';
+    }
+
+    // 1. Fetch transcript from InnerTube
+    const data = await fetchYouTubeTranscript(videoId, state.srcLang);
+
+    // 5. Fallback Mode: if captionTracks is undefined or empty -> Fall back to Groq STT -> Groq LLM -> TTS
+    if (!data || !data.hasCaptions || !data.mergedChunks || data.mergedChunks.length === 0) {
+      state.dubbingPipeline = 'reactive_stt';
+      lookaheadDubber.active = false;
+
+      if (elements.lookaheadBadge) {
+        elements.lookaheadBadge.style.display = 'flex';
+        elements.lookaheadBadge.style.borderColor = 'rgba(239, 68, 68, 0.4)';
+        elements.lookaheadBadge.style.color = '#f87171';
+        if (elements.lookaheadBadgeText) {
+          elements.lookaheadBadgeText.textContent = '🎤 STT Fallback Mode (No captions on video)';
+        }
+      }
+      if (elements.lookaheadPipelineText) {
+        elements.lookaheadPipelineText.innerHTML = '🎤 <strong>Fallback Mode Active:</strong> Captions unavailable for this video. Dubber will use Real-Time Speech Recognition (STT).';
+      }
+      if (elements.lookaheadStatusDot) {
+        elements.lookaheadStatusDot.style.background = '#f59e0b';
+      }
+      if (elements.bufferProgressGroup) {
+        elements.bufferProgressGroup.style.display = 'none';
+      }
+
+      showToast('No YouTube captions on this video. Dubber will automatically use Real-Time Speech Recognition (STT).', 'warning');
+      updateTicker('STT Fallback Mode: Captions disabled. Press Start Dubbing to capture live audio.', 'normal');
+      return;
+    }
+
+    // Success: Captions available!
+    state.dubbingPipeline = 'lookahead';
+    lookaheadDubber.active = true;
+    lookaheadDubber.chunks = data.mergedChunks;
+    data.mergedChunks.forEach(c => lookaheadDubber.chunkMap.set(c.startMs, c));
+
+    if (elements.lookaheadBadge) {
+      elements.lookaheadBadge.style.display = 'flex';
+      elements.lookaheadBadge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
+      elements.lookaheadBadge.style.color = '#34d399';
+      if (elements.lookaheadBadgeText) {
+        elements.lookaheadBadgeText.textContent = `⚡ Zero-Latency Lookahead: ${data.mergedChunks.length} Chunks Mapped`;
+      }
+    }
+    if (elements.lookaheadPipelineText) {
+      elements.lookaheadPipelineText.innerHTML = `⚡ <strong>Zero-Latency Lookahead Active:</strong> ${data.mergedChunks.length} chunks (${data.selectedTrack?.name || data.selectedTrack?.languageCode}) pre-mapped with 0s STT latency`;
+    }
+    if (elements.lookaheadStatusDot) {
+      elements.lookaheadStatusDot.style.background = '#10b981';
+    }
+
+    updateBufferUI();
+    showToast(`Transcript extracted (${data.mergedChunks.length} chunks). Pre-generating 60s lookahead audio buffer...`, 'success');
+    updateTicker(`⚡ Lookahead Ready: Pre-buffering initial 60 seconds...`, 'normal');
+
+    // 3. Initial Buffer: Immediately batch-send the first 60 seconds of merged transcript chunks
+    const initialChunks = lookaheadDubber.chunks.filter(c => c.startMs <= 60000);
+    if (initialChunks.length > 0) {
+      initialChunks.forEach(c => lookaheadDubber.inFlightTranslations.add(c.id));
+      batchTranslateChunks(initialChunks, state.srcLang, state.tgtLang, lookaheadDubber.abortController.signal)
+        .then(translations => {
+          translations.forEach(t => {
+            lookaheadDubber.translatedChunks.set(t.id, t.translatedText);
+            lookaheadDubber.inFlightTranslations.delete(t.id);
+            const chunk = lookaheadDubber.chunks.find(c => c.id === t.id);
+            if (chunk) {
+              prefetchLookaheadTTS(chunk, t.translatedText);
+            }
+          });
+        })
+        .catch(err => {
+          if (err.name !== 'AbortError') {
+            console.warn('Initial buffer translation warning:', err.message);
+          }
+          initialChunks.forEach(c => lookaheadDubber.inFlightTranslations.delete(c.id));
+        });
+    }
+  }
+
+  function updateBufferUI() {
+    if (!elements.bufferProgressGroup) return;
+    const total = lookaheadDubber.chunks.length;
+    const cached = lookaheadDubber.audioCache.size;
+    const pct = total > 0 ? Math.min(100, Math.round((cached / total) * 100)) : 0;
+
+    if (elements.bufferProgressVal) {
+      elements.bufferProgressVal.textContent = `${cached} / ${total} chunks (${pct}%)`;
+    }
+    if (elements.bufferProgressBar) {
+      elements.bufferProgressBar.style.width = `${pct}%`;
+    }
+  }
+
+  /**
+   * Batch Translation Helper (Groq Qwen 27B LPU via Edge)
+   */
+  async function batchTranslateChunks(chunksToTranslate, srcLang, tgtLang, signal) {
+    if (!chunksToTranslate || chunksToTranslate.length === 0) return [];
+
+    const sCode = (srcLang || 'en').split('-')[0].toLowerCase();
+    const tCode = (tgtLang || 'fr').split('-')[0].toLowerCase();
+
+    if (sCode === tCode) {
+      return chunksToTranslate.map(c => ({ id: c.id, translatedText: c.text }));
+    }
+
+    try {
+      const edgeUrl = `${getEdgeBaseUrl()}/api/translate`;
+      const res = await fetch(edgeUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chunks: chunksToTranslate.map(c => ({
+            id: c.id,
+            text: c.text,
+            durationMs: c.durationMs
+          })),
+          source: sCode,
+          target: tCode
+        }),
+        signal: signal
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.success && Array.isArray(data.translations)) {
+          return data.translations;
+        }
+      }
+    } catch (err) {
+      if (err.name === 'AbortError') throw err;
+      console.warn('Batch translation edge error, fallback to individual:', err.message);
+    }
+
+    // Fallback: translate concurrently via translateText
+    return await Promise.all(chunksToTranslate.map(async (c) => {
+      try {
+        const t = await translateText(c.text, sCode, tCode);
+        return { id: c.id, translatedText: t || c.text };
+      } catch (e) {
+        return { id: c.id, translatedText: c.text };
+      }
+    }));
+  }
+
+  /**
+   * Lookahead TTS Pre-Fetcher
+   */
+  async function prefetchLookaheadTTS(chunk, translatedText) {
+    if (!translatedText || lookaheadDubber.audioCache.has(chunk.startMs) || lookaheadDubber.inFlightTTS.has(chunk.startMs)) {
+      return;
+    }
+    lookaheadDubber.inFlightTTS.add(chunk.startMs);
+
+    try {
+      const audioData = await prefetchAudioData(translatedText);
+      if (audioData) {
+        lookaheadDubber.audioCache.set(chunk.startMs, {
+          audio: audioData.audio,
+          blobUrl: audioData.blobUrl,
+          audioBuffer: audioData.audioBuffer,
+          durationMs: audioData.durationMs,
+          chunk: chunk
+        });
+        updateBufferUI();
+      }
+    } catch (err) {
+      console.warn(`TTS prefetch failed for ${chunk.id}:`, err.message);
+    } finally {
+      lookaheadDubber.inFlightTTS.delete(chunk.startMs);
+    }
+  }
+
+  /**
+   * 3. Rolling 30-Second Lookahead Window & Polling Loop (100ms)
+   */
+  function pollYouTubeSync() {
+    if (!state.isDubbing || !lookaheadDubber.active) return;
+
+    const currentTimeMs = getYouTubeCurrentTimeMs();
+    const playerState = getYouTubePlayerState();
+
+    // Paused (2) or ended (0)
+    if (playerState === 2 || playerState === 0) {
+      if (lookaheadDubber.currentAudioEl && !lookaheadDubber.currentAudioEl.paused) {
+        try { lookaheadDubber.currentAudioEl.pause(); } catch (e) {}
+      }
+      return;
+    }
+
+    // 1. Detect Seek / Scrub (> 1500ms jump)
+    if (lookaheadDubber.lastCurrentTimeMs > 0 && Math.abs(currentTimeMs - lookaheadDubber.lastCurrentTimeMs) > 1500) {
+      handleLookaheadSeek(currentTimeMs);
+    }
+    lookaheadDubber.lastCurrentTimeMs = currentTimeMs;
+
+    // 2. Maintain Rolling 30-Second Window [currentTimeMs, currentTimeMs + 30000]
+    maintainLookaheadWindow(currentTimeMs);
+
+    // 3. Zero-Latency Trigger & Dynamic Playback Rate
+    checkAndTriggerPlayback(currentTimeMs);
+  }
+
+  function maintainLookaheadWindow(currentTimeMs) {
+    const windowEndMs = currentTimeMs + 30000;
+    const windowChunks = lookaheadDubber.chunks.filter(c => c.startMs >= currentTimeMs && c.startMs <= windowEndMs);
+
+    // A. Chunks needing translation
+    const untranslated = windowChunks.filter(c =>
+      !lookaheadDubber.translatedChunks.has(c.id) &&
+      !lookaheadDubber.inFlightTranslations.has(c.id)
+    );
+
+    if (untranslated.length > 0) {
+      untranslated.forEach(c => lookaheadDubber.inFlightTranslations.add(c.id));
+      batchTranslateChunks(untranslated, state.srcLang, state.tgtLang, lookaheadDubber.abortController.signal)
+        .then(translations => {
+          translations.forEach(t => {
+            lookaheadDubber.translatedChunks.set(t.id, t.translatedText);
+            lookaheadDubber.inFlightTranslations.delete(t.id);
+            const chunk = lookaheadDubber.chunks.find(c => c.id === t.id);
+            if (chunk) {
+              prefetchLookaheadTTS(chunk, t.translatedText);
+            }
+          });
+        })
+        .catch(err => {
+          untranslated.forEach(c => lookaheadDubber.inFlightTranslations.delete(c.id));
+        });
+    }
+
+    // B. Chunks needing TTS
+    const needTTS = windowChunks.filter(c =>
+      lookaheadDubber.translatedChunks.has(c.id) &&
+      !lookaheadDubber.audioCache.has(c.startMs) &&
+      !lookaheadDubber.inFlightTTS.has(c.startMs)
+    );
+
+    needTTS.forEach(c => {
+      const trans = lookaheadDubber.translatedChunks.get(c.id);
+      prefetchLookaheadTTS(c, trans);
+    });
+  }
+
+  function handleLookaheadSeek(newTimeMs) {
+    console.info(`[LookaheadDubber] User seek detected to ${newTimeMs}ms`);
+
+    // Stop current playing audio immediately
+    if (lookaheadDubber.currentAudioEl) {
+      try {
+        lookaheadDubber.currentAudioEl.pause();
+        lookaheadDubber.currentAudioEl.currentTime = 0;
+      } catch (e) {}
+      lookaheadDubber.currentAudioEl = null;
+    }
+
+    // Restore original YouTube volume
+    setYouTubeVolume(100);
+
+    // Abort out-of-range in-flight fetches
+    try { lookaheadDubber.abortController.abort(); } catch (e) {}
+    lookaheadDubber.abortController = new AbortController();
+    lookaheadDubber.inFlightTranslations.clear();
+    lookaheadDubber.inFlightTTS.clear();
+
+    // Reset played chunk IDs for chunks from newTimeMs onwards
+    const retainedPlayed = new Set();
+    lookaheadDubber.playedChunkIds.forEach(id => {
+      const c = lookaheadDubber.chunks.find(item => item.id === id);
+      if (c && c.endMs < newTimeMs) {
+        retainedPlayed.add(id);
+      }
+    });
+    lookaheadDubber.playedChunkIds = retainedPlayed;
+
+    // Immediately re-prioritize fetching from newTimeMs
+    maintainLookaheadWindow(newTimeMs);
+    updateTicker(`⚡ Scrubbed to ${formatTimeMs(newTimeMs)}: Lookahead window prioritized`, 'listening');
+  }
+
+  function checkAndTriggerPlayback(currentTimeMs) {
+    const chunk = lookaheadDubber.chunks.find(c => {
+      if (lookaheadDubber.playedChunkIds.has(c.id)) return false;
+      const diff = Math.abs(currentTimeMs - c.startMs);
+      if (diff <= 150) return true;
+      if (currentTimeMs >= c.startMs && currentTimeMs < c.endMs) return true;
+      return false;
+    });
+
+    if (!chunk) return;
+
+    lookaheadDubber.playedChunkIds.add(chunk.id);
+    playLookaheadChunk(chunk);
+  }
+
+  /**
+   * 4. Zero-Latency Sync & Dynamic Playback Rate
+   */
+  async function playLookaheadChunk(chunk) {
+    const cached = lookaheadDubber.audioCache.get(chunk.startMs);
+    const translatedText = lookaheadDubber.translatedChunks.get(chunk.id) || chunk.text;
+
+    // 1. Duck/Mute original YouTube video volume
+    const duckVol = state.duckingEnabled ? state.duckingDepth : 20;
+    setYouTubeVolume(duckVol);
+    setStatus('dubbing');
+
+    // 2. Measure decoded TTS audio duration against original segment window
+    // targetDurationMs = nextChunk.startMs - currentChunk.startMs
+    const targetDurationMs = chunk.targetDurationMs || (chunk.endMs - chunk.startMs);
+    let playbackRate = 1.0;
+
+    let ttsDurationMs = 4000;
+    if (cached && cached.durationMs) {
+      ttsDurationMs = cached.durationMs;
+    }
+
+    // 3. Dynamic Playback Rate:
+    // If ttsDurationMs > targetDurationMs, dynamically increase TTS playbackRate
+    // clamped between 1.0 and 1.35 with pitch preservation enabled
+    if (ttsDurationMs > targetDurationMs && targetDurationMs > 400) {
+      playbackRate = ttsDurationMs / targetDurationMs;
+      playbackRate = Math.min(1.35, Math.max(1.0, playbackRate));
+    }
+
+    // Stop previously playing dubbed audio if still running
+    if (lookaheadDubber.currentAudioEl) {
+      try {
+        lookaheadDubber.currentAudioEl.pause();
+        lookaheadDubber.currentAudioEl.currentTime = 0;
+      } catch (e) {}
+    }
+
+    // Render subtitle in transcript log & update ticker
+    const timeStr = formatTimeMs(chunk.startMs);
+    logTranscript(timeStr, chunk.text, translatedText);
+    if (elements.liveOriginalTranscript) elements.liveOriginalTranscript.textContent = chunk.text;
+    if (elements.liveTranslatedTranscript) elements.liveTranslatedTranscript.textContent = translatedText;
+    updateTicker(`Dubbing (${playbackRate.toFixed(2)}x): ${translatedText}`, 'dubbing');
+
+    if (cached && cached.audio) {
+      const audio = cached.audio;
+      audio.preservesPitch = true;
+      audio.mozPreservesPitch = true;
+      audio.webkitPreservesPitch = true;
+      audio.playbackRate = playbackRate;
+      audio.currentTime = 0;
+
+      lookaheadDubber.currentAudioEl = audio;
+      lookaheadDubber.currentChunkPlaying = chunk;
+
+      audio.onended = () => {
+        if (lookaheadDubber.currentChunkPlaying === chunk) {
+          lookaheadDubber.currentAudioEl = null;
+          lookaheadDubber.currentChunkPlaying = null;
+          setTimeout(() => {
+            if (!lookaheadDubber.currentAudioEl && state.isDubbing) {
+              setYouTubeVolume(100);
+              setStatus('listening');
+            }
+          }, 150);
+        }
+      };
+
+      try {
+        await audio.play();
+      } catch (playErr) {
+        console.warn('Audio play failed, fallback to SpeechSynthesis:', playErr);
+        await playSpeechSynthesisPromise(translatedText);
+        setYouTubeVolume(100);
+      }
+    } else {
+      // If audio buffer not yet in cache (e.g. ultra-fast seek), fallback to instant SpeechSynthesis
+      try {
+        await playSpeechSynthesisPromise(translatedText);
+      } finally {
+        setYouTubeVolume(100);
+      }
+    }
+  }
+
+  // Legacy canvas helpers preserved for fallback compatibility
   let lookaheadFrameQueue = [];
   let isLookaheadRunning = false;
   let lookaheadRafId = null;
 
   function startLookaheadVideoLoop() {
-    if (!state.lookaheadSyncEnabled || !state.mediaStream) return;
-    const videoTracks = state.mediaStream.getVideoTracks();
-    if (!videoTracks || videoTracks.length === 0) return;
-
-    const videoEl = elements.capturedVideoElement;
-    const canvas = elements.lookaheadVideoCanvas;
-    const badge = elements.lookaheadBadge;
-    if (!videoEl || !canvas) return;
-
-    try {
-      videoEl.srcObject = new MediaStream([videoTracks[0]]);
-      videoEl.play().catch(e => console.warn('Lookahead video element play error:', e));
-    } catch (err) {
-      console.warn('Lookahead video source attach error:', err);
-      return;
-    }
-
-    canvas.style.display = 'block';
-    if (badge) {
-      badge.style.display = 'flex';
-      if (elements.lookaheadBadgeText) {
-        elements.lookaheadBadgeText.textContent = `Lookahead Lip-Sync: ${state.lookaheadDelay.toFixed(1)}s Delay`;
-      }
-    }
-
-    isLookaheadRunning = true;
-    lookaheadFrameQueue = [];
-    const ctx = canvas.getContext('2d');
-
-    let lastCaptureTime = 0;
-    const targetFps = 30;
-    const frameInterval = 1000 / targetFps;
-
-    async function frameLoop(now) {
-      if (!isLookaheadRunning) return;
-
-      // 1. Capture live frame at 30 FPS
-      if (now - lastCaptureTime >= frameInterval && videoEl.readyState >= 2 && videoEl.videoWidth > 0) {
-        lastCaptureTime = now;
-        try {
-          if (canvas.width !== videoEl.videoWidth || canvas.height !== videoEl.videoHeight) {
-            canvas.width = videoEl.videoWidth;
-            canvas.height = videoEl.videoHeight;
-          }
-          const bitmap = await createImageBitmap(videoEl);
-          lookaheadFrameQueue.push({
-            bitmap,
-            timestamp: performance.now()
-          });
-        } catch (e) {}
-      }
-
-      // 2. Deliver frame delayed by state.lookaheadDelay seconds
-      const delayMs = state.lookaheadDelay * 1000;
-      const perfNow = performance.now();
-      let readyFrame = null;
-
-      while (lookaheadFrameQueue.length > 0 && (perfNow - lookaheadFrameQueue[0].timestamp) >= delayMs) {
-        if (readyFrame) {
-          readyFrame.bitmap.close();
-        }
-        readyFrame = lookaheadFrameQueue.shift();
-      }
-
-      if (readyFrame) {
-        ctx.drawImage(readyFrame.bitmap, 0, 0, canvas.width, canvas.height);
-        readyFrame.bitmap.close();
-      }
-
-      // Safety: prune queue to prevent GPU texture memory accumulation
-      const maxQueueLength = Math.ceil(targetFps * (state.lookaheadDelay + 1.5));
-      while (lookaheadFrameQueue.length > maxQueueLength) {
-        const discarded = lookaheadFrameQueue.shift();
-        if (discarded && discarded.bitmap) {
-          try { discarded.bitmap.close(); } catch (e) {}
-        }
-      }
-
-      lookaheadRafId = requestAnimationFrame(frameLoop);
-    }
-
-    lookaheadRafId = requestAnimationFrame(frameLoop);
+    // Preserved for backwards compatibility
   }
 
   function stopLookaheadVideoLoop() {
@@ -974,29 +1513,6 @@
     if (lookaheadRafId) {
       cancelAnimationFrame(lookaheadRafId);
       lookaheadRafId = null;
-    }
-
-    if (lookaheadFrameQueue.length > 0) {
-      for (const item of lookaheadFrameQueue) {
-        if (item && item.bitmap) {
-          try { item.bitmap.close(); } catch (e) {}
-        }
-      }
-      lookaheadFrameQueue = [];
-    }
-
-    if (elements.capturedVideoElement) {
-      try {
-        elements.capturedVideoElement.pause();
-        elements.capturedVideoElement.srcObject = null;
-      } catch (e) {}
-    }
-
-    if (elements.lookaheadVideoCanvas) {
-      elements.lookaheadVideoCanvas.style.display = 'none';
-    }
-    if (elements.lookaheadBadge) {
-      elements.lookaheadBadge.style.display = 'none';
     }
   }
 
@@ -1529,15 +2045,17 @@
   const activeUtterances = new Set();
 
   /**
-   * Pre-fetch audio buffer concurrently while earlier chunks are still speaking
+   * Pre-fetch audio data returning both decoded Web Audio buffer and HTMLAudioElement with pitch preservation
    */
-  async function prefetchAudioBuffer(text) {
+  async function prefetchAudioData(text) {
+    if (!text || !text.trim()) return null;
     const langPrefix = state.tgtLang.split('-')[0].toLowerCase();
+    let arrayBuffer = null;
 
     // 0. Groq Canopy Orpheus (Sub-second studio neural Arabic & English)
     if (state.ttsEngine === 'groq' || (langPrefix === 'ar' && state.ttsEngine !== 'elevenlabs' && state.ttsEngine !== 'speechSynthesis')) {
       try {
-        const groqUrl = 'https://dubber.atmr.workers.dev/api/groq/tts';
+        const groqUrl = `${getEdgeBaseUrl()}/api/groq/tts`;
         const isAr = langPrefix === 'ar';
         const defaultVoice = isAr ? 'fahad' : 'autumn';
         const defaultModel = isAr ? 'canopylabs/orpheus-arabic-saudi' : 'canopylabs/orpheus-v1-english';
@@ -1551,20 +2069,17 @@
           })
         });
         if (res.ok) {
-          const arrayBuffer = await res.arrayBuffer();
-          const ctx = initAudioContext();
-          if (ctx.state === 'suspended') await ctx.resume();
-          return await ctx.decodeAudioData(arrayBuffer);
+          arrayBuffer = await res.arrayBuffer();
         }
       } catch (err) {
-        console.warn('Groq TTS prefetch failed, will fallback:', err.message);
+        console.warn('Groq TTS prefetch failed:', err.message);
       }
     }
 
-    // 1. ElevenLabs Flash v2.5 (Sub-second studio neural Arabic & Multilingual)
-    if (state.ttsEngine === 'elevenlabs' || langPrefix === 'ar') {
+    // 1. ElevenLabs Flash v2.5
+    if (!arrayBuffer && (state.ttsEngine === 'elevenlabs' || langPrefix === 'ar')) {
       try {
-        const elUrl = 'https://dubber.atmr.workers.dev/api/elevenlabs/tts';
+        const elUrl = `${getEdgeBaseUrl()}/api/elevenlabs/tts`;
         const res = await fetch(elUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1575,76 +2090,43 @@
           })
         });
         if (res.ok) {
-          const arrayBuffer = await res.arrayBuffer();
-          const ctx = initAudioContext();
-          if (ctx.state === 'suspended') await ctx.resume();
-          return await ctx.decodeAudioData(arrayBuffer);
+          arrayBuffer = await res.arrayBuffer();
         }
       } catch (err) {
-        console.warn('ElevenLabs prefetch failed, will fallback:', err.message);
+        console.warn('ElevenLabs prefetch failed:', err.message);
       }
     }
 
-    // 1. Mistral Voxtral (Ultra-Natural French and English Studio Neural TTS)
-    if (state.ttsEngine === 'mistral') {
-      if (langPrefix === 'fr' || langPrefix === 'en') {
-        try {
-          const url = 'https://dubber.atmr.workers.dev/api/mistral/tts';
-          let chosenVoice = state.mistralVoice;
-          if (!chosenVoice || (langPrefix === 'fr' && !chosenVoice.startsWith('fr_')) || (langPrefix === 'en' && !chosenVoice.startsWith('en_') && !chosenVoice.startsWith('gb_'))) {
-            chosenVoice = langPrefix === 'fr' ? 'fr_marie_happy' : 'en_paul_happy';
-          }
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text: text,
-              target: state.tgtLang,
-              voice: chosenVoice
-            })
-          });
-
-          if (res.ok) {
-            const arrayBuffer = await res.arrayBuffer();
-            const ctx = initAudioContext();
-            if (ctx.state === 'suspended') await ctx.resume();
-            return await ctx.decodeAudioData(arrayBuffer);
-          }
-        } catch (err) {
-          console.warn('Mistral TTS prefetch failed, trying Deepgram fallback:', err.message);
-        }
-      }
-      
-      // For non-FR/EN languages (e.g. Spanish, German, Japanese), gracefully use Deepgram Aura-2
-      if (langPrefix !== 'ar') {
-        try {
-          const dgUrl = 'https://dubber.atmr.workers.dev/api/deepgram/tts';
-          const dgRes = await fetch(dgUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text: text,
-              target: state.tgtLang
-            })
-          });
-          if (dgRes.ok) {
-            const arrayBuffer = await dgRes.arrayBuffer();
-            const ctx = initAudioContext();
-            if (ctx.state === 'suspended') await ctx.resume();
-            return await ctx.decodeAudioData(arrayBuffer);
-          }
-        } catch (dgErr) {
-          console.warn('Deepgram fallback failed:', dgErr.message);
-        }
-      }
-    }
-
-    // 2. Deepgram Aura-2 (Ultra-fast, natively supports French, German, Spanish, English, Dutch, Italian, Japanese)
-    // Deepgram Aura-2 does not support Arabic (ar)
-    if (state.ttsEngine === 'deepgram' && langPrefix !== 'ar') {
+    // 2. Mistral Voxtral
+    if (!arrayBuffer && state.ttsEngine === 'mistral' && (langPrefix === 'fr' || langPrefix === 'en')) {
       try {
-        const url = 'https://dubber.atmr.workers.dev/api/deepgram/tts';
+        const url = `${getEdgeBaseUrl()}/api/mistral/tts`;
+        let chosenVoice = state.mistralVoice;
+        if (!chosenVoice || (langPrefix === 'fr' && !chosenVoice.startsWith('fr_')) || (langPrefix === 'en' && !chosenVoice.startsWith('en_') && !chosenVoice.startsWith('gb_'))) {
+          chosenVoice = langPrefix === 'fr' ? 'fr_marie_happy' : 'en_paul_happy';
+        }
         const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: text,
+            target: state.tgtLang,
+            voice: chosenVoice
+          })
+        });
+        if (res.ok) {
+          arrayBuffer = await res.arrayBuffer();
+        }
+      } catch (err) {
+        console.warn('Mistral TTS prefetch failed:', err.message);
+      }
+    }
+
+    // 3. Deepgram Aura-2
+    if (!arrayBuffer && langPrefix !== 'ar') {
+      try {
+        const dgUrl = `${getEdgeBaseUrl()}/api/deepgram/tts`;
+        const dgRes = await fetch(dgUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1652,20 +2134,16 @@
             target: state.tgtLang
           })
         });
-
-        if (res.ok) {
-          const arrayBuffer = await res.arrayBuffer();
-          const ctx = initAudioContext();
-          if (ctx.state === 'suspended') await ctx.resume();
-          return await ctx.decodeAudioData(arrayBuffer);
+        if (dgRes.ok) {
+          arrayBuffer = await dgRes.arrayBuffer();
         }
-      } catch (err) {
-        console.warn('Deepgram prefetch failed, will fallback:', err.message);
+      } catch (dgErr) {
+        console.warn('Deepgram fallback failed:', dgErr.message);
       }
     }
 
-    // 2. OpenRouter Audio TTS if configured
-    if (state.ttsEngine === 'openrouter' && state.apiKey) {
+    // 4. OpenRouter Audio TTS if configured
+    if (!arrayBuffer && state.ttsEngine === 'openrouter' && state.apiKey) {
       try {
         const res = await fetch('https://openrouter.ai/api/v1/audio/speech', {
           method: 'POST',
@@ -1679,20 +2157,48 @@
             voice: 'alloy'
           })
         });
-
         if (res.ok) {
-          const arrayBuffer = await res.arrayBuffer();
-          const ctx = initAudioContext();
-          if (ctx.state === 'suspended') await ctx.resume();
-          return await ctx.decodeAudioData(arrayBuffer);
+          arrayBuffer = await res.arrayBuffer();
         }
       } catch (err) {
         console.warn('OpenRouter prefetch failed:', err.message);
       }
     }
 
-    // Return null to signal SpeechSynthesis fallback (Arabic, offline, or default)
-    return null;
+    if (!arrayBuffer || arrayBuffer.byteLength < 100) {
+      return null;
+    }
+
+    const blob = new Blob([arrayBuffer], { type: 'audio/mp3' });
+    const blobUrl = URL.createObjectURL(blob);
+    const audio = new Audio(blobUrl);
+    audio.preservesPitch = true;
+    audio.mozPreservesPitch = true;
+    audio.webkitPreservesPitch = true;
+
+    let audioBuffer = null;
+    let durationMs = 3000;
+    try {
+      const ctx = initAudioContext();
+      if (ctx.state === 'suspended') await ctx.resume();
+      audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+      durationMs = audioBuffer.duration * 1000;
+    } catch (e) {}
+
+    return {
+      audio,
+      blobUrl,
+      audioBuffer,
+      durationMs
+    };
+  }
+
+  /**
+   * Pre-fetch audio buffer concurrently while earlier chunks are still speaking
+   */
+  async function prefetchAudioBuffer(text) {
+    const data = await prefetchAudioData(text);
+    return data ? data.audioBuffer : null;
   }
 
   /**
@@ -1937,11 +2443,47 @@
 
   async function startDubbing() {
     try {
-      // 1. Start Audio Capture (Screen/Tab by default)
+      // 0. If YouTube Lookahead mode is active and we have transcript chunks:
+      if (state.dubbingPipeline === 'lookahead' && lookaheadDubber.active && lookaheadDubber.chunks.length > 0) {
+        state.isDubbing = true;
+        elements.pillToggleBtn.classList.add('is-active');
+        elements.pillToggleLabel.textContent = 'Stop Dub';
+        elements.pillToggleIcon.innerHTML = `
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="6" y="6" width="12" height="12"/>
+          </svg>
+        `;
+
+        if (elements.heroDubBtn) {
+          elements.heroDubBtn.classList.add('is-active');
+          if (elements.heroDubLabel) elements.heroDubLabel.textContent = 'Stop Dubbing';
+          if (elements.heroDubIcon) {
+            elements.heroDubIcon.innerHTML = `
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="6" width="12" height="12"/>
+              </svg>
+            `;
+          }
+        }
+
+        // Start 100ms sync polling loop
+        if (!lookaheadDubber.pollTimer) {
+          lookaheadDubber.pollTimer = setInterval(pollYouTubeSync, 100);
+        }
+
+        // Play YouTube video if currently paused
+        playYouTubeVideo();
+
+        setStatus('listening');
+        updateTicker(`⚡ Zero-Latency YouTube Dubbing active (${lookaheadDubber.chunks.length} chunks mapped)`, 'listening');
+        showToast('Zero-Latency YouTube Dubbing started! (0s STT Lag)', 'success');
+        return;
+      }
+
+      // Fallback Mode (Requirement 5): Live Audio Capture (Screen/Tab or Mic)
       await startAudioCapture();
 
-      // 2. Setup STT ONLY if physical microphone was explicitly chosen
-      // Screen/Tab and Android Internal Audio do NOT use SpeechRecognition!
+      // Setup STT ONLY if physical microphone was explicitly chosen
       if (state.captureSource === 'mic') {
         const recognition = setupSpeechRecognition();
         if (recognition) {
@@ -1983,6 +2525,20 @@
 
   function stopDubbing() {
     state.isDubbing = false;
+
+    // Stop Lookahead polling loop & audio
+    if (lookaheadDubber.pollTimer) {
+      clearInterval(lookaheadDubber.pollTimer);
+      lookaheadDubber.pollTimer = null;
+    }
+    if (lookaheadDubber.currentAudioEl) {
+      try {
+        lookaheadDubber.currentAudioEl.pause();
+        lookaheadDubber.currentAudioEl.currentTime = 0;
+      } catch (e) {}
+      lookaheadDubber.currentAudioEl = null;
+    }
+    setYouTubeVolume(100);
 
     if (state.recognition) {
       try { state.recognition.stop(); } catch (e) {}
@@ -2912,19 +3468,20 @@
       window.speechSynthesis.onvoiceschanged = populateVoiceList;
     }
 
-    // YouTube Embed Loader
-    elements.loadYoutubeBtn.addEventListener('click', () => {
-      let url = elements.youtubeUrlInput.value.trim();
-      if (!url) return;
-      let videoId = url;
-      // Match YouTube IDs
-      const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
-      if (match && match[1]) {
-        videoId = match[1];
-      }
-      elements.youtubePlayer.src = `https://www.youtube-nocookie.com/embed/${videoId}?enablejsapi=1&autoplay=1`;
-      showToast('Loaded YouTube video.', 'success');
-    });
+    // YouTube Embed Loader & Lookahead Pre-fetch
+    if (elements.loadYoutubeBtn) {
+      elements.loadYoutubeBtn.addEventListener('click', () => {
+        loadYouTubeVideo();
+      });
+    }
+    if (elements.youtubeUrlInput) {
+      elements.youtubeUrlInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          loadYouTubeVideo();
+        }
+      });
+    }
 
     // Test Utterance sample buttons
     document.querySelectorAll('.test-utterance-btn').forEach(btn => {

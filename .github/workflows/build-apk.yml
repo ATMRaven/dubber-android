@@ -56,10 +56,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cp android/app/build/outputs/apk/debug/app-debug.apk Dubber.apk
-          gh release create v1.4.2 Dubber.apk \
-            --title "Dubber Android v1.4.2" \
-            --notes "Dubber v1.4.2: Integrated Groq Canopy Orpheus ultra-fast neural speech synthesis for Arabic and English, made Groq Arabic (Fahad, Noura, Sultan, Lulwa, Aisha) the default for Arabic over ElevenLabs, added high-speed English Orpheus voices, updated Cloudflare Worker edge routes, and synchronized Android internal screen audio service." \
-            || gh release upload v1.4.2 Dubber.apk --clobber
+          gh release create v1.5.0 Dubber.apk \
+            --title "Dubber Android v1.5.0 (Zero-Latency Lookahead)" \
+            --notes "Dubber v1.5.0: Eliminated 5–10s STT latency for YouTube dubbing by replacing live audio capture with YouTube InnerTube transcript pre-fetching and a lookahead TTS audio buffer. Features 60s initial buffer, 30s rolling lookahead window, sentence merging & breath group normalization, dynamic playback rate duration matching (1.0–1.35x) with pitch preservation, audio ducking, seek handling, and automatic STT fallback mode." \
+            || gh release upload v1.5.0 Dubber.apk --clobber
+          gh release upload v1.4.2 Dubber.apk --clobber || true
           gh release upload v1.4.1 Dubber.apk --clobber || true
           gh release upload v1.4.0 Dubber.apk --clobber || true
           gh release upload v1.3.9 Dubber.apk --clobber || true
